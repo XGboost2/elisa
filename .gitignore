@@ -1,0 +1,35 @@
+node_modules/
+.expo/
+.expo-shared/
+npm-debug.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.orig.*
+web-build/
+dist/
+
+# Backend
+backend/__pycache__/
+backend/**/__pycache__/
+backend/.env
+backend/venv/
+backend/uploads/
+backend/results/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.log
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
