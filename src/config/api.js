@@ -15,4 +15,7 @@ export const ENDPOINTS = {
     QUANTIFY: '/quantify',
     CALIBRATIONS: '/calibrations',
     CHECK_ALIGNMENT: '/check-alignment',
+    EXPORT: '/export',
+    SERIAL_DILUTION: '/serial-dilution',
+    REPLICATE_STATS: '/replicate-stats',
 };

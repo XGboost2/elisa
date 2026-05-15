@@ -1,14 +1,17 @@
 """
 API routes for ELISA plate analysis
 """
-from fastapi import APIRouter, UploadFile, File, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import List, Optional, Dict
+import csv
+import io
 import os
 import re
 import uuid
 import json
+import time
 import numpy as np
 from datetime import datetime
 
@@ -60,6 +63,20 @@ router = APIRouter()
 plate_analyzer = PlateAnalyzer()
 calibration_service = CalibrationService()
 
+# Simple in-memory rate limiter for heavy endpoints
+_analyze_timestamps: dict[str, list[float]] = {}
+ANALYZE_RATE_LIMIT = 10  # max requests per minute per IP approximation
+ANALYZE_RATE_WINDOW = 60.0
+
+
+def _check_rate_limit(key: str) -> None:
+    now = time.monotonic()
+    timestamps = _analyze_timestamps.setdefault(key, [])
+    timestamps[:] = [t for t in timestamps if now - t < ANALYZE_RATE_WINDOW]
+    if len(timestamps) >= ANALYZE_RATE_LIMIT:
+        raise HTTPException(status_code=429, detail="Too many requests. Try again later.")
+    timestamps.append(now)
+
 
 class AnalysisResponse(BaseModel):
     analysis_id: str
@@ -68,6 +85,11 @@ class AnalysisResponse(BaseModel):
     error: Optional[str] = None
     quality: Optional[dict] = None
     wells_detected: Optional[int] = None
+    expected_wells: Optional[int] = None
+    chromogen: Optional[str] = None
+    assay_type: Optional[str] = None
+    control_qc: Optional[dict] = None
+    edge_effects: Optional[dict] = None
     wells: Optional[List[dict]] = None
 
 
@@ -127,24 +149,30 @@ async def check_alignment(
 
 @router.post("/analyze", response_model=AnalysisResponse)
 async def analyze_plate(
-    file: UploadFile = File(..., description="ELISA plate image")
+    file: UploadFile = File(..., description="ELISA plate image"),
+    negative_control: Optional[str] = Form(None, description="Comma-separated negative control positions"),
+    positive_control: Optional[str] = Form(None, description="Comma-separated positive control positions"),
+    chromogen: str = Form("tmb", description="Substrate: tmb, opd, pnpp, abts, grayscale"),
+    assay_type: str = Form("sandwich", description="sandwich or competitive"),
 ):
-    print(f"📤 Received upload: {file.filename} ({file.content_type})")
+    _check_rate_limit("analyze")
 
     if not file.content_type or not file.content_type.startswith('image/'):
-        raise HTTPException(
-            status_code=400,
-            detail=f"File must be an image. Received: {file.content_type}"
-        )
+        raise HTTPException(status_code=400, detail=f"File must be an image. Received: {file.content_type}")
 
     contents = await file.read()
     if len(contents) > settings.MAX_UPLOAD_SIZE:
-        raise HTTPException(
-            status_code=413,
-            detail=f"File too large. Max size is {settings.MAX_UPLOAD_SIZE // (1024 * 1024)}MB"
-        )
+        raise HTTPException(status_code=413, detail=f"File too large. Max {settings.MAX_UPLOAD_SIZE // (1024*1024)}MB")
     if not _is_valid_image(contents):
         raise HTTPException(status_code=400, detail="File does not appear to be a valid image")
+
+    def _parse_positions(raw: Optional[str]) -> Optional[List[str]]:
+        if not raw:
+            return None
+        return [p.strip().upper() for p in raw.split(",") if p.strip()]
+
+    neg_list = _parse_positions(negative_control)
+    pos_list = _parse_positions(positive_control)
 
     analysis_id = str(uuid.uuid4())
     timestamp = datetime.utcnow().isoformat()
@@ -158,14 +186,15 @@ async def analyze_plate(
         raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
 
     try:
-        results = plate_analyzer.analyze_image(upload_path)
-    except Exception as e:
-        return AnalysisResponse(
-            analysis_id=analysis_id,
-            timestamp=timestamp,
-            success=False,
-            error=str(e)
+        results = plate_analyzer.analyze_image(
+            upload_path,
+            negative_control=neg_list,
+            positive_control=pos_list,
+            chromogen=chromogen,
+            assay_type=assay_type,
         )
+    except Exception as e:
+        return AnalysisResponse(analysis_id=analysis_id, timestamp=timestamp, success=False, error=str(e))
 
     results = json.loads(json.dumps(results, cls=NumpySafeEncoder))
 
@@ -180,7 +209,12 @@ async def analyze_plate(
         error=results.get("error"),
         quality=results.get("quality"),
         wells_detected=results.get("wells_detected"),
-        wells=results.get("wells")
+        expected_wells=results.get("expected_wells"),
+        chromogen=results.get("chromogen"),
+        assay_type=results.get("assay_type"),
+        control_qc=results.get("control_qc"),
+        edge_effects=results.get("edge_effects"),
+        wells=results.get("wells"),
     )
 
 
@@ -335,3 +369,129 @@ async def delete_results(analysis_id: str):
         raise HTTPException(status_code=404, detail="Analysis not found")
 
     return {"message": f"Deleted {', '.join(deleted)}", "analysis_id": analysis_id}
+
+
+# ------------------------------------------------------------------
+# CSV export
+# ------------------------------------------------------------------
+
+@router.get("/export/{analysis_id}")
+async def export_csv(analysis_id: str):
+    """Export analysis results as a CSV file (8×12 OD grid + well details)."""
+    _validate_id(analysis_id, "analysis ID")
+    results_path = os.path.join(settings.RESULTS_DIR, f"{analysis_id}.json")
+
+    if not os.path.exists(results_path):
+        raise HTTPException(status_code=404, detail="Results not found")
+
+    with open(results_path, "r") as f:
+        data = json.load(f)
+
+    wells = data.get("wells", [])
+    row_labels = "ABCDEFGH"
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+
+    # Header metadata
+    writer.writerow(["ELISA Plate Analysis — FOR RESEARCH USE ONLY"])
+    writer.writerow(["Analysis ID", data.get("analysis_id", "")])
+    writer.writerow(["Timestamp", data.get("timestamp", "")])
+    writer.writerow(["Chromogen", data.get("chromogen", "N/A")])
+    writer.writerow(["Assay Type", data.get("assay_type", "N/A")])
+    writer.writerow([])
+
+    # 8×12 OD grid
+    writer.writerow(["OD Grid"] + [str(c + 1) for c in range(12)])
+    well_map = {w["position"]: w for w in wells}
+    for r in range(8):
+        row = [row_labels[r]]
+        for c in range(12):
+            pos = f"{row_labels[r]}{c+1}"
+            w = well_map.get(pos)
+            row.append(f"{w['optical_density']:.4f}" if w else "")
+        writer.writerow(row)
+
+    writer.writerow([])
+
+    # Normalized signal grid (if available)
+    has_norm = any(w.get("normalized_signal") is not None for w in wells)
+    if has_norm:
+        writer.writerow(["Normalized Signal (%)"] + [str(c + 1) for c in range(12)])
+        for r in range(8):
+            row = [row_labels[r]]
+            for c in range(12):
+                pos = f"{row_labels[r]}{c+1}"
+                w = well_map.get(pos)
+                ns = w.get("normalized_signal") if w else None
+                row.append(f"{ns:.1f}" if ns is not None else "")
+            writer.writerow(row)
+        writer.writerow([])
+
+    # Detailed well list
+    writer.writerow(["Position", "Row", "Col", "Intensity", "OD", "Normalized %", "Edge Well"])
+    for w in sorted(wells, key=lambda x: (x["row"], x["col"])):
+        ns = w.get("normalized_signal")
+        writer.writerow([
+            w["position"], w["row"], w["col"],
+            f"{w['intensity']:.1f}",
+            f"{w['optical_density']:.4f}",
+            f"{ns:.1f}" if ns is not None else "",
+            "yes" if w.get("is_edge") else "",
+        ])
+
+    # Control QC
+    qc = data.get("control_qc")
+    if qc and qc.get("applied"):
+        writer.writerow([])
+        writer.writerow(["Control QC"])
+        writer.writerow(["Neg control OD", f"{qc['negative_control']['mean_od']:.4f}"])
+        writer.writerow(["Pos control OD", f"{qc['positive_control']['mean_od']:.4f}"])
+        writer.writerow(["OD range", f"{qc['od_range']:.4f}"])
+        writer.writerow(["S/N ratio", f"{qc['signal_to_noise']:.1f}"])
+        writer.writerow(["Cutoff 2SD", f"{qc.get('cutoff_2sd', 0):.4f}"])
+        writer.writerow(["Cutoff 3SD", f"{qc.get('cutoff_3sd', 0):.4f}"])
+        writer.writerow(["QC passed", "Yes" if qc["qc_passed"] else "No"])
+
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="elisa_{analysis_id}.csv"'},
+    )
+
+
+# ------------------------------------------------------------------
+# Serial dilution helper
+# ------------------------------------------------------------------
+
+class SerialDilutionRequest(BaseModel):
+    start_concentration: float = Field(..., gt=0)
+    dilution_factor: float = Field(default=2.0, gt=1)
+    n_points: int = Field(default=7, ge=2, le=12)
+    include_zero: bool = True
+
+
+@router.post("/serial-dilution")
+async def generate_serial_dilution(request: SerialDilutionRequest):
+    series = calibration_service.generate_serial_dilution(
+        request.start_concentration,
+        request.dilution_factor,
+        request.n_points,
+        request.include_zero,
+    )
+    return {"concentrations": series}
+
+
+# ------------------------------------------------------------------
+# Replicate statistics
+# ------------------------------------------------------------------
+
+class ReplicateRequest(BaseModel):
+    wells: List[dict]
+    groups: Dict[str, List[str]]
+
+
+@router.post("/replicate-stats")
+async def compute_replicate_stats(request: ReplicateRequest):
+    stats = PlateAnalyzer.compute_replicate_stats(request.wells, request.groups)
+    return {"stats": stats}

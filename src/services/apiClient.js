@@ -8,28 +8,19 @@ const apiClient = axios.create({
     },
 });
 
-export const analyzeImage = async (imageUri) => {
+export const analyzeImage = async (imageUri, { negativeControl, positiveControl, chromogen, assayType } = {}) => {
     try {
-        // Create form data
         const formData = new FormData();
 
-        // Handle web vs mobile differently
         if (imageUri.startsWith('blob:') || imageUri.startsWith('http')) {
-            // Web platform - fetch the blob and append as File
             const response = await fetch(imageUri);
             const blob = await response.blob();
-
-            // Create a proper filename
             const filename = `plate_${Date.now()}.jpg`;
-
-            // Append as File object for web
             formData.append('file', blob, filename);
         } else {
-            // Mobile platform - use native file upload format
             const filename = imageUri.split('/').pop();
             const match = /\.(\w+)$/.exec(filename);
             const type = match ? `image/${match[1]}` : 'image/jpeg';
-
             formData.append('file', {
                 uri: imageUri,
                 name: filename,
@@ -37,11 +28,24 @@ export const analyzeImage = async (imageUri) => {
             });
         }
 
+        if (negativeControl && negativeControl.length > 0) {
+            formData.append('negative_control', negativeControl.join(','));
+        }
+        if (positiveControl && positiveControl.length > 0) {
+            formData.append('positive_control', positiveControl.join(','));
+        }
+        if (chromogen) {
+            formData.append('chromogen', chromogen);
+        }
+        if (assayType) {
+            formData.append('assay_type', assayType);
+        }
+
         const response = await apiClient.post(ENDPOINTS.ANALYZE, formData, {
             headers: {
                 'Content-Type': 'multipart/form-data',
             },
-            timeout: 60000, // 60 seconds for image analysis
+            timeout: 60000,
         });
 
         return response.data;
@@ -49,7 +53,6 @@ export const analyzeImage = async (imageUri) => {
         console.error('Analysis error:', error);
         console.error('Error response:', error.response?.data);
 
-        // Better error message extraction
         const errorMessage = error.response?.data?.detail ||
             error.response?.data?.message ||
             error.message ||
@@ -148,6 +151,46 @@ export const checkAlignment = async (imageUri) => {
     }
 };
 
+export const exportResults = async (analysisId) => {
+    try {
+        const response = await apiClient.get(`${ENDPOINTS.EXPORT}/${analysisId}`, {
+            responseType: 'text',
+        });
+        return response.data;
+    } catch (error) {
+        console.error('Export error:', error.response?.data || error.message);
+        throw new Error('Failed to export results');
+    }
+};
+
+export const generateSerialDilution = async (startConcentration, dilutionFactor = 2.0, nPoints = 7, includeZero = true) => {
+    try {
+        const response = await apiClient.post(ENDPOINTS.SERIAL_DILUTION, {
+            start_concentration: startConcentration,
+            dilution_factor: dilutionFactor,
+            n_points: nPoints,
+            include_zero: includeZero,
+        });
+        return response.data;
+    } catch (error) {
+        console.error('Serial dilution error:', error.response?.data || error.message);
+        throw new Error('Failed to generate serial dilution');
+    }
+};
+
+export const getReplicateStats = async (wells, groupSize = 2) => {
+    try {
+        const response = await apiClient.post(ENDPOINTS.REPLICATE_STATS, {
+            wells,
+            group_size: groupSize,
+        });
+        return response.data;
+    } catch (error) {
+        console.error('Replicate stats error:', error.response?.data || error.message);
+        throw new Error('Failed to calculate replicate stats');
+    }
+};
+
 export const testConnection = async () => {
     try {
         const response = await axios.get(`${API_BASE_URL.replace('/api', '')}/health`, {
@@ -168,5 +211,8 @@ export default {
     listCalibrations,
     deleteResults,
     checkAlignment,
+    exportResults,
+    generateSerialDilution,
+    getReplicateStats,
     testConnection,
 };

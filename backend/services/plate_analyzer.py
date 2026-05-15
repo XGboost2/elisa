@@ -1,20 +1,36 @@
 """
 Core ELISA plate analysis engine
-Handles plate detection, grid identification, and color analysis
+Handles plate detection, uniform grid mapping, chromogen-aware color analysis,
+control normalization, edge-effect detection, and qualitative cutoff.
+
+NOTE: Camera-based analysis is semi-quantitative. For research / point-of-care
+screening only — not a replacement for spectrophotometric plate readers.
 """
 import cv2
 import numpy as np
 from typing import Tuple, List, Optional, Dict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from utils.config import settings
 from utils.image_preprocessing import (
     normalize_lighting,
     reduce_noise,
-    enhance_edges,
     correct_perspective,
     assess_image_quality
 )
+
+# BGR channel indices for chromogen-specific measurement.
+# Using the substrate's absorption channel gives better dynamic range
+# than grayscale (research shows ~2× improvement for TMB blue channel).
+CHROMOGENS = {
+    "tmb":       {"channel": 0, "ref_channel": 2, "label": "TMB (450 nm)"},
+    "opd":       {"channel": 1, "ref_channel": 2, "label": "OPD (492 nm)"},
+    "pnpp":      {"channel": 0, "ref_channel": 2, "label": "pNPP (405 nm)"},
+    "abts":      {"channel": 1, "ref_channel": 2, "label": "ABTS (405 nm)"},
+    "grayscale": {"channel": None, "ref_channel": None, "label": "Grayscale"},
+}
+
+DEFAULT_CHROMOGEN = "tmb"
 
 
 @dataclass
@@ -22,104 +38,76 @@ class WellData:
     """Data for a single well"""
     row: int
     col: int
-    position: str  # e.g., "A1"
+    position: str
     center: Tuple[int, int]
     rgb_mean: Tuple[float, float, float]
     rgb_median: Tuple[float, float, float]
-    intensity: float  # Grayscale intensity
-    optical_density: float  # OD equivalent
+    intensity: float
+    optical_density: float
+    normalized_signal: Optional[float] = None
+    is_edge: bool = False
 
 
 class PlateAnalyzer:
     """ELISA plate detection and analysis"""
-    
+
+    CORRECTED_WIDTH = 1200
+    CORRECTED_HEIGHT = 900
+
     def __init__(self):
         self.rows = settings.PLATE_ROWS
         self.cols = settings.PLATE_COLS
         self.total_wells = settings.TOTAL_WELLS
-        
+
+    # ------------------------------------------------------------------
+    # Plate detection
+    # ------------------------------------------------------------------
+
     def detect_plate(self, image: np.ndarray) -> Optional[np.ndarray]:
-        """
-        Detect plate boundaries in the image
-        
-        Args:
-            image: Input BGR image
-            
-        Returns:
-            Four corner points of the plate, or None if not detected
-        """
-        # Preprocess
+        """Detect plate boundaries using edge detection."""
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         gray = reduce_noise(gray)
-        
-        # Edge detection
         edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-        
-        # Find contours
         contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
+
         if not contours:
             return None
-        
-        # Find the largest rectangular contour
+
         max_area = 0
         best_contour = None
-        
         for contour in contours:
             area = cv2.contourArea(contour)
             if area > max_area:
-                # Approximate contour to polygon
                 epsilon = 0.02 * cv2.arcLength(contour, True)
                 approx = cv2.approxPolyDP(contour, epsilon, True)
-                
-                # Check if it's roughly rectangular (4 corners)
-                if len(approx) == 4 and area > 10000:  # Min area threshold
+                if len(approx) == 4 and area > 10000:
                     max_area = area
                     best_contour = approx
-        
+
         if best_contour is None:
             return None
-        
-        # Order corners: top-left, top-right, bottom-right, bottom-left
-        corners = self._order_corners(best_contour.reshape(4, 2))
-        
-        return corners
-    
+        return self._order_corners(best_contour.reshape(4, 2))
+
     def _detect_plate_robust(self, image: np.ndarray) -> Optional[np.ndarray]:
-        """
-        More robust plate detection that tries multiple strategies.
-        Used by check_alignment for real-time camera frames which are
-        often lower quality / compressed.
-
-        Args:
-            image: Input BGR image
-
-        Returns:
-            Four corner points of the plate, or None if not detected
-        """
+        """Robust multi-strategy plate detection for real-time camera frames."""
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         gray = reduce_noise(gray)
         h, w = gray.shape[:2]
-        min_area = h * w * 0.10  # plate should be at least 10% of frame
+        min_area = h * w * 0.10
 
         best_contour = None
         best_area = 0
 
-        # Strategy 1: Canny with multiple thresholds
         for low, high in [(30, 100), (50, 150), (80, 200)]:
             edges = cv2.Canny(gray, low, high, apertureSize=3)
-            # Dilate to close gaps in edges
             kernel = np.ones((3, 3), np.uint8)
             edges = cv2.dilate(edges, kernel, iterations=1)
-
             contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
             for contour in contours:
                 area = cv2.contourArea(contour)
                 if area < min_area or area <= best_area:
                     continue
-
-                # Try multiple epsilon values for polygon approximation
                 for eps_factor in [0.01, 0.02, 0.03, 0.05]:
                     epsilon = eps_factor * cv2.arcLength(contour, True)
                     approx = cv2.approxPolyDP(contour, epsilon, True)
@@ -128,17 +116,14 @@ class PlateAnalyzer:
                         best_contour = contour
                         break
 
-        # Strategy 2: Adaptive threshold + morphology
         if best_contour is None:
             binary = cv2.adaptiveThreshold(
                 gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                cv2.THRESH_BINARY_INV, 11, 2
+                cv2.THRESH_BINARY_INV, 11, 2,
             )
             kernel = np.ones((5, 5), np.uint8)
             binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=2)
-
             contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
             for contour in contours:
                 area = cv2.contourArea(contour)
                 if area < min_area or area <= best_area:
@@ -149,344 +134,374 @@ class PlateAnalyzer:
         if best_contour is None:
             return None
 
-        # Use minAreaRect for robust corner extraction (handles non-perfect contours)
         rect = cv2.minAreaRect(best_contour)
         box = cv2.boxPoints(rect)
-        corners = self._order_corners(box)
-
-        return corners
+        return self._order_corners(box)
 
     def _order_corners(self, points: np.ndarray) -> np.ndarray:
-        """
-        Order corner points in consistent order
-        
-        Args:
-            points: 4 corner points
-            
-        Returns:
-            Ordered points [TL, TR, BR, BL]
-        """
-        # Sort by y-coordinate
+        """Order corner points: [TL, TR, BR, BL]"""
         sorted_y = points[np.argsort(points[:, 1])]
-        
-        # Top two points
-        top = sorted_y[:2]
-        top = top[np.argsort(top[:, 0])]  # Sort by x
-        
-        # Bottom two points
-        bottom = sorted_y[2:]
-        bottom = bottom[np.argsort(bottom[:, 0])]  # Sort by x
-        
+        top = sorted_y[:2][np.argsort(sorted_y[:2, 0])]
+        bottom = sorted_y[2:][np.argsort(sorted_y[2:, 0])]
         return np.array([top[0], top[1], bottom[1], bottom[0]], dtype=np.float32)
-    
-    def detect_grid(self, image: np.ndarray) -> Tuple[List[int], List[int]]:
-        """
-        Detect grid lines to identify wells
-        
-        Args:
-            image: Perspective-corrected plate image
-            
-        Returns:
-            Tuple of (row_positions, col_positions) as pixel coordinates
-        """
-        height, width = image.shape[:2]
-        
-        # Convert to grayscale
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        
-        # Apply threshold to find wells (they are typically darker)
-        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        
-        # Find contours (wells)
-        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        # Filter contours by size and shape
-        wells = []
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            if area < 100 or area > 5000:  # Filter by reasonable well size
-                continue
-            
-            # Get bounding circle
-            (x, y), radius = cv2.minEnclosingCircle(contour)
-            circularity = area / (np.pi * radius * radius) if radius > 0 else 0
-            
-            # Wells should be roughly circular
-            if circularity > 0.6:
-                wells.append((int(x), int(y)))
-        
-        if len(wells) < self.total_wells * 0.8:  # Should find most wells
-            # Fallback to uniform grid
-            return self._create_uniform_grid(width, height)
-        
-        # Cluster wells into rows and columns
-        wells = np.array(wells)
-        
-        # Find row positions
-        y_coords = wells[:, 1]
-        row_positions = self._cluster_positions(y_coords, self.rows)
-        
-        # Find column positions
-        x_coords = wells[:, 0]
-        col_positions = self._cluster_positions(x_coords, self.cols)
-        
-        return sorted(row_positions), sorted(col_positions)
-    
-    def _cluster_positions(self, positions: np.ndarray, n_clusters: int) -> List[int]:
-        """
-        Cluster positions into n groups
-        
-        Args:
-            positions: Array of positions
-            n_clusters: Number of clusters
-            
-        Returns:
-            List of cluster centers
-        """
-        from sklearn.cluster import KMeans
-        
-        positions = positions.reshape(-1, 1)
-        kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
-        kmeans.fit(positions)
-        
-        return [int(center[0]) for center in kmeans.cluster_centers_]
-    
+
     def _create_uniform_grid(self, width: int, height: int) -> Tuple[List[int], List[int]]:
-        """
-        Create uniform grid as fallback
-        
-        Args:
-            width: Image width
-            height: Image height
-            
-        Returns:
-            Tuple of (row_positions, col_positions)
-        """
-        # Add margins
-        margin_x = width * 0.05
-        margin_y = height * 0.05
-        
-        # Calculate spacing
-        row_spacing = (height - 2 * margin_y) / (self.rows - 1)
-        col_spacing = (width - 2 * margin_x) / (self.cols - 1)
-        
-        row_positions = [int(margin_y + i * row_spacing) for i in range(self.rows)]
-        col_positions = [int(margin_x + i * col_spacing) for i in range(self.cols)]
-        
-        return row_positions, col_positions
-    
+        """Create uniform well grid for a perspective-corrected plate image."""
+        mx = width * 0.05
+        my = height * 0.05
+        rs = (height - 2 * my) / (self.rows - 1)
+        cs = (width - 2 * mx) / (self.cols - 1)
+        rows = [int(my + i * rs) for i in range(self.rows)]
+        cols = [int(mx + i * cs) for i in range(self.cols)]
+        return rows, cols
+
+    # ------------------------------------------------------------------
+    # Well extraction — chromogen-aware
+    # ------------------------------------------------------------------
+
     def analyze_wells(
         self,
         image: np.ndarray,
         row_positions: List[int],
         col_positions: List[int],
-        well_radius: int = 20
+        well_radius: int = 20,
+        chromogen: str = DEFAULT_CHROMOGEN,
     ) -> List[WellData]:
         """
-        Extract color data from each well
-        
-        Args:
-            image: Perspective-corrected plate image
-            row_positions: Y-coordinates of well rows
-            col_positions: X-coordinates of well columns
-            well_radius: Radius of well sampling area
-            
-        Returns:
-            List of WellData objects
+        Extract color data from each well on a RAW (non-CLAHE) image.
+
+        When a chromogen is specified, the measurement uses the substrate's
+        primary absorption channel (e.g. blue for TMB) instead of grayscale.
+        This improves dynamic range by ~2× on 8-bit camera sensors.
         """
-        wells_data = []
-        row_labels = 'ABCDEFGH'
-        
+        config = CHROMOGENS.get(chromogen, CHROMOGENS[DEFAULT_CHROMOGEN])
+        meas_ch = config["channel"]
+        ref_ch = config["ref_channel"]
+
+        wells_data: List[WellData] = []
+        row_labels = "ABCDEFGH"
+
         for i, y in enumerate(row_positions):
             for j, x in enumerate(col_positions):
-                # Create circular mask for well
                 mask = np.zeros(image.shape[:2], dtype=np.uint8)
                 cv2.circle(mask, (x, y), well_radius, 255, -1)
-                
-                # Extract pixels within the well
                 well_pixels = image[mask == 255]
-                
+
                 if len(well_pixels) == 0:
                     continue
-                
-                # Calculate RGB statistics
+
                 rgb_mean = tuple(np.mean(well_pixels, axis=0).astype(float))
                 rgb_median = tuple(np.median(well_pixels, axis=0).astype(float))
-                
-                # Convert to grayscale intensity
-                gray_pixels = cv2.cvtColor(well_pixels.reshape(-1, 1, 3), cv2.COLOR_BGR2GRAY)
-                intensity = float(np.mean(gray_pixels))
-                
-                # Calculate optical density (OD)
-                # OD = -log10(I/I0) where I0 is max intensity (255)
-                # For dark wells: higher OD, for light wells: lower OD
-                od = -np.log10((intensity + 1) / 256.0)  # Add 1 to avoid log(0)
-                
-                well_data = WellData(
-                    row=i,
-                    col=j,
+
+                # Channel-specific intensity
+                if meas_ch is not None:
+                    raw = float(np.mean(well_pixels[:, meas_ch]))
+                    if ref_ch is not None:
+                        ref = float(np.mean(well_pixels[:, ref_ch]))
+                        intensity = max(raw - 0.3 * ref, 1.0)
+                    else:
+                        intensity = raw
+                else:
+                    gray = cv2.cvtColor(well_pixels.reshape(-1, 1, 3), cv2.COLOR_BGR2GRAY)
+                    intensity = float(np.mean(gray))
+
+                od = -np.log10((intensity + 1) / 256.0)
+                is_edge = (i == 0 or i == self.rows - 1 or j == 0 or j == self.cols - 1)
+
+                wells_data.append(WellData(
+                    row=i, col=j,
                     position=f"{row_labels[i]}{j+1}",
                     center=(x, y),
                     rgb_mean=rgb_mean,
                     rgb_median=rgb_median,
                     intensity=intensity,
-                    optical_density=float(od)
-                )
-                
-                wells_data.append(well_data)
-        
+                    optical_density=float(od),
+                    is_edge=is_edge,
+                ))
+
         return wells_data
-    
+
+    # ------------------------------------------------------------------
+    # Control normalization + cutoff + edge-effect detection
+    # ------------------------------------------------------------------
+
+    def _apply_control_normalization(
+        self,
+        wells: List[WellData],
+        negative_control: List[str],
+        positive_control: List[str],
+        assay_type: str = "sandwich",
+    ) -> Dict:
+        """
+        Normalize using positive/negative controls.
+
+        For sandwich ELISA: higher OD = more analyte.
+        For competitive ELISA: lower OD = more analyte (%B/B0 reported).
+        """
+        neg_wells = [w for w in wells if w.position in negative_control]
+        pos_wells = [w for w in wells if w.position in positive_control]
+
+        if not neg_wells or not pos_wells:
+            return {"applied": False, "reason": "Controls not found on plate"}
+
+        neg_mean_int = float(np.mean([w.intensity for w in neg_wells]))
+        pos_mean_int = float(np.mean([w.intensity for w in pos_wells]))
+
+        if neg_mean_int <= 1:
+            return {"applied": False, "reason": "Negative control intensity too low"}
+
+        # Blank-corrected OD using negative control as I₀
+        for well in wells:
+            ratio = max(well.intensity, 1) / neg_mean_int
+            well.optical_density = float(max(0.0, -np.log10(min(ratio, 1.0))))
+
+        od_neg = float(np.mean([w.optical_density for w in neg_wells]))
+        od_pos = float(np.mean([w.optical_density for w in pos_wells]))
+        od_range = od_pos - od_neg
+
+        # Normalized signal / %B/B0
+        if abs(od_range) > 0.01:
+            for well in wells:
+                pct = (well.optical_density - od_neg) / od_range * 100.0
+                if assay_type == "competitive":
+                    well.normalized_signal = float(100.0 - pct)
+                else:
+                    well.normalized_signal = float(pct)
+        else:
+            for well in wells:
+                well.normalized_signal = None
+
+        # Qualitative cutoff: mean(neg) + 2 SD / 3 SD
+        neg_ods = [w.optical_density for w in neg_wells]
+        neg_std = float(np.std(neg_ods)) if len(neg_ods) > 1 else 0.0
+        cutoff_2sd = float(np.mean(neg_ods) + 2 * neg_std)
+        cutoff_3sd = float(np.mean(neg_ods) + 3 * neg_std)
+
+        signal_to_noise = od_pos / od_neg if od_neg > 0.001 else float("inf")
+
+        return {
+            "applied": True,
+            "assay_type": assay_type,
+            "negative_control": {
+                "positions": negative_control,
+                "mean_intensity": neg_mean_int,
+                "mean_od": od_neg,
+            },
+            "positive_control": {
+                "positions": positive_control,
+                "mean_intensity": pos_mean_int,
+                "mean_od": od_pos,
+            },
+            "od_range": od_range,
+            "signal_to_noise": float(min(signal_to_noise, 9999)),
+            "cutoff_2sd": cutoff_2sd,
+            "cutoff_3sd": cutoff_3sd,
+            "qc_passed": od_range > 0.05 and signal_to_noise > 2.0,
+            "issues": [
+                i for i in [
+                    "Low OD range between controls" if od_range <= 0.05 else None,
+                    "Poor signal-to-noise ratio" if signal_to_noise <= 2.0 else None,
+                ] if i is not None
+            ],
+        }
+
+    def _detect_edge_effects(self, wells: List[WellData]) -> Optional[Dict]:
+        """Compare edge-well OD to inner-well OD; flag if >15 % different."""
+        edge_ods = [w.optical_density for w in wells if w.is_edge]
+        inner_ods = [w.optical_density for w in wells if not w.is_edge]
+
+        if not edge_ods or not inner_ods:
+            return None
+
+        edge_mean = float(np.mean(edge_ods))
+        inner_mean = float(np.mean(inner_ods))
+
+        if inner_mean < 0.001:
+            return {"detected": False, "edge_mean_od": edge_mean, "inner_mean_od": inner_mean, "difference_pct": 0.0}
+
+        diff_pct = float(abs(edge_mean - inner_mean) / inner_mean * 100)
+        return {
+            "detected": diff_pct > 15,
+            "edge_mean_od": edge_mean,
+            "inner_mean_od": inner_mean,
+            "difference_pct": diff_pct,
+        }
+
+    # ------------------------------------------------------------------
+    # Replicate statistics
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def compute_replicate_stats(wells: List[Dict], replicate_groups: Dict[str, List[str]]) -> List[Dict]:
+        """
+        Compute mean, SD, CV% for user-defined replicate groups.
+
+        replicate_groups: {"Sample1": ["B1","B2"], "Sample2": ["C1","C2"], ...}
+        """
+        well_map = {w["position"]: w for w in wells}
+        stats = []
+        for label, positions in replicate_groups.items():
+            ods = [well_map[p]["optical_density"] for p in positions if p in well_map]
+            if not ods:
+                continue
+            mean_od = float(np.mean(ods))
+            std_od = float(np.std(ods, ddof=1)) if len(ods) > 1 else 0.0
+            cv_pct = float(std_od / mean_od * 100) if mean_od > 0.001 else 0.0
+            norms = [well_map[p].get("normalized_signal") for p in positions if p in well_map]
+            norms = [n for n in norms if n is not None]
+            stats.append({
+                "label": label,
+                "positions": positions,
+                "n": len(ods),
+                "mean_od": mean_od,
+                "std_od": std_od,
+                "cv_pct": cv_pct,
+                "cv_acceptable": cv_pct < 10.0,
+                "mean_normalized": float(np.mean(norms)) if norms else None,
+            })
+        return stats
+
+    # ------------------------------------------------------------------
+    # Alignment check (camera real-time)
+    # ------------------------------------------------------------------
+
     def check_alignment(self, image_path: str) -> Dict:
-        """
-        Quick check if the ELISA plate is aligned within the expected guide area.
-        Used for real-time camera feedback.
-
-        Args:
-            image_path: Path to image file
-
-        Returns:
-            Alignment status dictionary
-        """
+        """Quick alignment check for real-time camera feedback."""
         image = cv2.imread(image_path)
         if image is None:
             return {"aligned": False, "reason": "Could not load image"}
 
-        # Resize for speed
         h, w = image.shape[:2]
         scale = 480 / max(h, w)
         small = cv2.resize(image, (int(w * scale), int(h * scale)))
         sh, sw = small.shape[:2]
 
-        # Preprocess
         small = normalize_lighting(small)
-
-        # Detect plate using robust method
         corners = self._detect_plate_robust(small)
         if corners is None:
             return {"aligned": False, "reason": "No plate detected"}
 
-        # Check alignment criteria (all values cast to Python types):
-        # 1. Plate should be roughly centered
-        plate_center_x = float(np.mean(corners[:, 0]))
-        plate_center_y = float(np.mean(corners[:, 1]))
-        image_center_x = sw / 2.0
-        image_center_y = sh / 2.0
+        pcx = float(np.mean(corners[:, 0]))
+        pcy = float(np.mean(corners[:, 1]))
+        cox = abs(pcx - sw / 2.0) / sw
+        coy = abs(pcy - sh / 2.0) / sh
+        is_centered = bool(cox < 0.15 and coy < 0.15)
 
-        center_offset_x = abs(plate_center_x - image_center_x) / sw
-        center_offset_y = abs(plate_center_y - image_center_y) / sh
-        is_centered = bool(center_offset_x < 0.15 and center_offset_y < 0.15)
+        pw = float(np.max(corners[:, 0]) - np.min(corners[:, 0]))
+        ph = float(np.max(corners[:, 1]) - np.min(corners[:, 1]))
+        wr = pw / sw
+        hr = ph / sh
+        good_size = bool(wr > 0.50 and hr > 0.30)
 
-        # 2. Plate should fill a good portion of the image
-        plate_width = float(np.max(corners[:, 0]) - np.min(corners[:, 0]))
-        plate_height = float(np.max(corners[:, 1]) - np.min(corners[:, 1]))
-        width_ratio = plate_width / sw
-        height_ratio = plate_height / sh
-        good_size = bool(width_ratio > 0.50 and height_ratio > 0.30)
+        tl, tr, bl = corners[0], corners[1], corners[3]
+        ta = float(abs(np.degrees(np.arctan2(tr[1] - tl[1], tr[0] - tl[0]))))
+        la = float(abs(np.degrees(np.arctan2(bl[0] - tl[0], bl[1] - tl[1]))))
+        is_straight = bool(ta < 7.0 and la < 7.0)
 
-        # 3. Plate should not be too tilted
-        top_left, top_right = corners[0], corners[1]
-        bottom_left = corners[3]
-
-        top_angle = float(abs(np.degrees(np.arctan2(
-            top_right[1] - top_left[1],
-            top_right[0] - top_left[0]
-        ))))
-        left_angle = float(abs(np.degrees(np.arctan2(
-            bottom_left[0] - top_left[0],
-            bottom_left[1] - top_left[1]
-        ))))
-        is_straight = bool(top_angle < 7.0 and left_angle < 7.0)
-
-        # 4. Aspect ratio should be close to 3:2 (standard 96-well plate)
-        aspect_ratio = float(plate_width / plate_height) if plate_height > 0 else 0.0
-        good_aspect = bool(1.1 < aspect_ratio < 2.0)
+        ar = float(pw / ph) if ph > 0 else 0.0
+        good_aspect = bool(1.1 < ar < 2.0)
 
         aligned = is_centered and good_size and is_straight and good_aspect
-
         reasons = []
-        if not is_centered:
-            reasons.append("Plate not centered")
-        if not good_size:
-            reasons.append("Plate too small or too far")
-        if not is_straight:
-            reasons.append("Plate is tilted")
-        if not good_aspect:
-            reasons.append("Plate aspect ratio incorrect")
+        if not is_centered: reasons.append("Plate not centered")
+        if not good_size:   reasons.append("Plate too small or too far")
+        if not is_straight: reasons.append("Plate is tilted")
+        if not good_aspect: reasons.append("Plate aspect ratio incorrect")
 
         return {
             "aligned": aligned,
             "reason": "; ".join(reasons) if reasons else "Aligned",
             "details": {
-                "centered": is_centered,
-                "good_size": good_size,
-                "straight": is_straight,
-                "good_aspect": good_aspect,
-                "center_offset": [center_offset_x, center_offset_y],
-                "size_ratio": [width_ratio, height_ratio],
-                "top_angle": top_angle,
-                "aspect_ratio": aspect_ratio,
-            }
+                "centered": is_centered, "good_size": good_size,
+                "straight": is_straight, "good_aspect": good_aspect,
+                "center_offset": [cox, coy], "size_ratio": [wr, hr],
+                "top_angle": ta, "aspect_ratio": ar,
+            },
         }
 
-    def analyze_image(self, image_path: str) -> Dict:
+    # ------------------------------------------------------------------
+    # Full analysis pipeline
+    # ------------------------------------------------------------------
+
+    def analyze_image(
+        self,
+        image_path: str,
+        negative_control: Optional[List[str]] = None,
+        positive_control: Optional[List[str]] = None,
+        chromogen: str = DEFAULT_CHROMOGEN,
+        assay_type: str = "sandwich",
+    ) -> Dict:
         """
-        Complete analysis pipeline
-        
-        Args:
-            image_path: Path to image file
-            
-        Returns:
-            Analysis results dictionary
+        Complete analysis pipeline.
+
+        Uses CLAHE only for plate detection; raw image is used for
+        color measurement so pixel intensities are not distorted.
         """
-        # Load image
         image = cv2.imread(image_path)
         if image is None:
             raise ValueError(f"Could not load image: {image_path}")
-        
-        # Assess quality
+
         quality = assess_image_quality(image)
-        
-        # Preprocess
-        image = normalize_lighting(image)
-        
-        # Detect plate
-        corners = self.detect_plate(image)
+
+        detection_image = normalize_lighting(image.copy())
+        corners = self.detect_plate(detection_image)
         if corners is None:
             return {
                 "success": False,
                 "error": "Could not detect ELISA plate in image",
-                "quality": quality
+                "quality": quality,
             }
-        
-        # Correct perspective
-        corrected = correct_perspective(image, corners, output_size=(1200, 900))
-        
-        # Detect grid
-        row_positions, col_positions = self.detect_grid(corrected)
-        
-        # Analyze wells
-        wells_data = self.analyze_wells(corrected, row_positions, col_positions)
-        
-        # Format results
-        results = {
+
+        corrected = correct_perspective(
+            image, corners,
+            output_size=(self.CORRECTED_WIDTH, self.CORRECTED_HEIGHT),
+        )
+
+        row_positions, col_positions = self._create_uniform_grid(
+            self.CORRECTED_WIDTH, self.CORRECTED_HEIGHT,
+        )
+        row_sp = row_positions[1] - row_positions[0] if len(row_positions) > 1 else 40
+        col_sp = col_positions[1] - col_positions[0] if len(col_positions) > 1 else 40
+        well_radius = int(min(row_sp, col_sp) * 0.35)
+
+        wells_data = self.analyze_wells(
+            corrected, row_positions, col_positions, well_radius, chromogen,
+        )
+
+        # Control normalization
+        control_qc = None
+        if negative_control and positive_control and wells_data:
+            control_qc = self._apply_control_normalization(
+                wells_data, negative_control, positive_control, assay_type,
+            )
+
+        # Edge-effect detection
+        edge_effects = self._detect_edge_effects(wells_data)
+
+        wells_out = [
+            {
+                "position": w.position,
+                "row": w.row,
+                "col": w.col,
+                "rgb_mean": list(w.rgb_mean),
+                "rgb_median": list(w.rgb_median),
+                "intensity": w.intensity,
+                "optical_density": w.optical_density,
+                "normalized_signal": w.normalized_signal,
+                "is_edge": w.is_edge,
+            }
+            for w in wells_data
+        ]
+
+        return {
             "success": True,
             "quality": quality,
             "plate_detected": True,
             "wells_detected": len(wells_data),
             "expected_wells": self.total_wells,
-            "wells": [
-                {
-                    "position": well.position,
-                    "row": well.row,
-                    "col": well.col,
-                    "rgb_mean": list(well.rgb_mean),
-                    "rgb_median": list(well.rgb_median),
-                    "intensity": well.intensity,
-                    "optical_density": well.optical_density
-                }
-                for well in wells_data
-            ]
+            "chromogen": chromogen,
+            "assay_type": assay_type,
+            "control_qc": control_qc,
+            "edge_effects": edge_effects,
+            "wells": wells_out,
         }
-        
-        return results

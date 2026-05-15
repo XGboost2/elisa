@@ -20,7 +20,7 @@ import theme from '../styles/theme';
 import PlateOverlay from '../components/PlateOverlay';
 import { checkAlignment } from '../services/apiClient';
 
-const ALIGNMENT_CHECK_INTERVAL = 1500; // ms between checks
+const ALIGNMENT_CHECK_INTERVAL = 3000; // ms between checks
 
 export default function CameraScreen({ navigation }) {
     const [permission, requestPermission] = useCameraPermissions();

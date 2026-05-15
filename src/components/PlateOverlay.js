@@ -6,11 +6,9 @@
  *   - Default blue: alignment not yet checked
  */
 import React from 'react';
-import { View, Text, StyleSheet, Dimensions } from 'react-native';
+import { View, Text, StyleSheet, useWindowDimensions } from 'react-native';
 import Svg, { Rect, Line, Circle } from 'react-native-svg';
 import theme from '../styles/theme';
-
-const { width, height } = Dimensions.get('window');
 
 const ALIGNED_COLOR = '#4CAF50';       // Green
 const NOT_ALIGNED_COLOR = '#F44336';   // Red
@@ -20,6 +18,8 @@ const DEFAULT_COLOR = theme.colors.primary;
 const DEFAULT_LIGHT = theme.colors.primaryLight;
 
 export default function PlateOverlay({ isAligned, alignmentReason }) {
+    const { width, height } = useWindowDimensions();
+
     // Overlay dimensions (96-well plate aspect ratio ~3:2)
     const overlayWidth = width * 0.85;
     const overlayHeight = overlayWidth * (2 / 3);

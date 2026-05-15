@@ -11,12 +11,8 @@ class Settings(BaseSettings):
     API_PORT: int = 8000
     DEBUG: bool = False
     
-    # CORS
-    CORS_ORIGINS: List[str] = [
-        "http://localhost:19006",  # Expo web
-        "exp://localhost:19000",   # Expo mobile
-        "http://localhost:8081",   # React Native metro
-    ]
+    # CORS — "*" in dev allows physical-device testing over LAN
+    CORS_ORIGINS: List[str] = ["*"]
     
     # File storage
     UPLOAD_DIR: str = "./uploads"

@@ -8,6 +8,7 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import HomeScreen from './src/screens/HomeScreen';
 import CameraScreen from './src/screens/CameraScreen';
 import ResultsScreen from './src/screens/ResultsScreen';
+import CalibrationScreen from './src/screens/CalibrationScreen';
 
 const Stack = createNativeStackNavigator();
 
@@ -23,6 +24,7 @@ export default function App() {
                 <Stack.Screen name="Home" component={HomeScreen} />
                 <Stack.Screen name="Camera" component={CameraScreen} />
                 <Stack.Screen name="Results" component={ResultsScreen} />
+                <Stack.Screen name="Calibration" component={CalibrationScreen} />
             </Stack.Navigator>
         </NavigationContainer>
     );

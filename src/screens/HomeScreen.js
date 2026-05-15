@@ -171,6 +171,14 @@ export default function HomeScreen({ navigation }) {
                 </Text>
             </View>
 
+            {/* Disclaimer */}
+            <View style={styles.disclaimerBox}>
+                <Text style={styles.disclaimerText}>
+                    For Research Use Only — Not for Clinical Diagnostics.{'\n'}
+                    Camera-based readings have lower precision than dedicated plate readers.
+                </Text>
+            </View>
+
             <View style={styles.bottomSpacer} />
         </ScrollView>
     );
@@ -334,6 +342,21 @@ const styles = StyleSheet.create({
         fontSize: theme.typography.body2,
         color: theme.colors.gray900,
         lineHeight: 22,
+    },
+    disclaimerBox: {
+        margin: theme.spacing.lg,
+        marginTop: 0,
+        padding: theme.spacing.md,
+        backgroundColor: theme.colors.accentLight,
+        borderRadius: theme.borderRadius.lg,
+        borderLeftWidth: 4,
+        borderLeftColor: theme.colors.warning,
+    },
+    disclaimerText: {
+        fontSize: theme.typography.caption,
+        color: theme.colors.gray900,
+        lineHeight: 18,
+        textAlign: 'center',
     },
     bottomSpacer: {
         height: theme.spacing.xxl,

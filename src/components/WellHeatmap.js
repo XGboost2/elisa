@@ -1,8 +1,6 @@
 import React from 'react';
-import { View, Text, StyleSheet, Dimensions } from 'react-native';
+import { View, Text, StyleSheet, useWindowDimensions } from 'react-native';
 import theme from '../styles/theme';
-
-const { width } = Dimensions.get('window');
 
 export function getColorFromOD(od) {
     const normalizedOD = Math.min(Math.max(od, 0), 2) / 2;
@@ -18,6 +16,8 @@ function getTextColorForOD(od) {
 }
 
 export default function WellHeatmap({ wells }) {
+    const { width } = useWindowDimensions();
+
     const grid = Array(8).fill(null).map(() => Array(12).fill(null));
 
     wells.forEach(well => {

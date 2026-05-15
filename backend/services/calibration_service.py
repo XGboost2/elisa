@@ -205,37 +205,24 @@ class CalibrationService:
             concentration = 10 ** log_conc
             
         elif curve.curve_type == '4pl':
-            # Numerical solution for 4PL
             a, b, c, d = curve.coefficients
-            
-            # Check if OD is within curve range
+
             if not (min(a, d) <= od_value <= max(a, d)):
                 return None
-            
-            # Solve iteratively using Newton's method
-            # Start from inflection point
-            x = c
-            for _ in range(100):
-                fx = self.four_parameter_logistic(x, *curve.coefficients) - od_value
-                
-                # Derivative
-                if abs(x) < 1e-10:
-                    break
-                    
-                dfx = -b * (a - d) * (x / c) ** b / (x * (1 + (x / c) ** b) ** 2)
-                
-                if abs(dfx) < 1e-10:
-                    break
-                
-                x_new = x - fx / dfx
-                
-                if abs(x_new - x) < 1e-6:
-                    x = x_new
-                    break
-                    
-                x = x_new
-            
-            concentration = float(x)
+
+            # Invert the 4PL analytically: x = c * ((a - d)/(y - d) - 1)^(1/b)
+            denom = od_value - d
+            if abs(denom) < 1e-10:
+                return None
+
+            ratio = (a - d) / denom - 1
+            if ratio <= 0:
+                return None
+
+            try:
+                concentration = float(c * (ratio ** (1.0 / b)))
+            except (ValueError, ZeroDivisionError, OverflowError):
+                return None
         else:
             return None
         
@@ -294,11 +281,61 @@ class CalibrationService:
                 if cv_percent > 20:
                     issues.append(f"High variability (CV% = {cv_percent:.1f}%)")
         
+        # Hook effect: signal should increase monotonically with concentration
+        hook = self.detect_hook_effect(concentrations, od_values)
+        if hook["detected"]:
+            issues.append(hook["message"])
+
         return {
             "is_valid": is_valid,
             "r_squared": curve.r_squared,
             "n_points": len(curve.points),
             "curve_type": curve.curve_type,
             "equation": curve.equation,
-            "issues": issues if issues else None
+            "hook_effect": hook,
+            "issues": issues if issues else None,
         }
+
+    # ------------------------------------------------------------------
+    # Hook-effect detection
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def detect_hook_effect(
+        concentrations: List[float], od_values: List[float],
+    ) -> Dict:
+        """
+        Detect the prozone / hook effect: at very high analyte concentrations
+        the signal paradoxically drops, producing false-low results.
+        """
+        pairs = sorted(zip(concentrations, od_values))
+        ods = [od for _, od in pairs]
+
+        for i in range(1, len(ods)):
+            if ods[i] < ods[i - 1] * 0.85:
+                return {
+                    "detected": True,
+                    "hook_concentration": float(pairs[i][0]),
+                    "message": (
+                        f"Signal decrease at concentration {pairs[i][0]:.3g} — "
+                        "possible hook effect. Consider diluting high samples."
+                    ),
+                }
+        return {"detected": False}
+
+    # ------------------------------------------------------------------
+    # Serial-dilution helper
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def generate_serial_dilution(
+        start_concentration: float,
+        dilution_factor: float = 2.0,
+        n_points: int = 7,
+        include_zero: bool = True,
+    ) -> List[float]:
+        """Generate a serial dilution series (highest → lowest)."""
+        series = [start_concentration / (dilution_factor ** i) for i in range(n_points)]
+        if include_zero:
+            series.append(0.0)
+        return series
