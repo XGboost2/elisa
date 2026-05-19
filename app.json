@@ -1,47 +1,56 @@
 {
-    "expo": {
-        "name": "ELISA Analyzer",
-        "slug": "elisa-analyzer",
-        "version": "1.0.0",
-        "orientation": "portrait",
-        "icon": "./assets/icon.png",
-        "userInterfaceStyle": "automatic",
-        "splash": {
-            "image": "./assets/splash.png",
-            "resizeMode": "contain",
-            "backgroundColor": "#ffffff"
-        },
-        "assetBundlePatterns": [
-            "**/*"
-        ],
-        "ios": {
-            "supportsTablet": true,
-            "infoPlist": {
-                "NSCameraUsageDescription": "This app needs camera access to capture ELISA plate images for analysis.",
-                "NSPhotoLibraryUsageDescription": "This app needs photo library access to select ELISA plate images for analysis."
-            }
-        },
-        "android": {
-            "adaptiveIcon": {
-                "foregroundImage": "./assets/adaptive-icon.png",
-                "backgroundColor": "#ffffff"
-            },
-            "permissions": [
-                "android.permission.CAMERA",
-                "android.permission.READ_EXTERNAL_STORAGE",
-                "android.permission.WRITE_EXTERNAL_STORAGE"
-            ]
-        },
-        "web": {
-            "favicon": "./assets/favicon.png"
-        },
-        "plugins": [
-            [
-                "expo-camera",
-                {
-                    "cameraPermission": "Allow $(PRODUCT_NAME) to access your camera to capture ELISA plate images."
-                }
-            ]
-        ]
-    }
+  "expo": {
+    "name": "ELISA Analyzer",
+    "slug": "elisa-analyser",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSCameraUsageDescription": "This app needs camera access to capture ELISA plate images for analysis.",
+        "NSPhotoLibraryUsageDescription": "This app needs photo library access to select ELISA plate images for analysis.",
+        "ITSAppUsesNonExemptEncryption": false
+      },
+      "bundleIdentifier": "com.kuralelisa.elisaanalyser"
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#ffffff"
+      },
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.RECORD_AUDIO"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow $(PRODUCT_NAME) to access your camera to capture ELISA plate images."
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "00409535-8726-4927-a22f-111a5477edd7"
+      }
+    },
+    "owner": "kural-elisa"
+  }
 }

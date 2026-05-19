@@ -446,6 +446,13 @@ class PlateAnalyzer:
         detection_image = normalize_lighting(image.copy())
         corners = self.detect_plate(detection_image)
         if corners is None:
+            corners = self._detect_plate_robust(detection_image)
+        if corners is None:
+            corners = self._detect_plate_robust(image)
+        if corners is None:
+            h, w = image.shape[:2]
+            corners = np.array([[0, 0], [w-1, 0], [w-1, h-1], [0, h-1]], dtype=np.float32)
+        if corners is None:
             return {
                 "success": False,
                 "error": "Could not detect ELISA plate in image",
