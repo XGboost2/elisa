@@ -1,6 +1,9 @@
 node_modules/
 .expo/
 .expo-shared/
+.venv/
+.pytest_cache/
+.deepeval/
 npm-debug.*
 *.jks
 *.p8
@@ -18,6 +21,7 @@ backend/.env
 backend/venv/
 backend/uploads/
 backend/results/
+backend/dataset/
 *.pyc
 *.pyo
 *.pyd

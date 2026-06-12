@@ -1,7 +1,7 @@
 """
 API routes for ELISA plate analysis
 """
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from typing import List, Optional, Dict
@@ -34,6 +34,10 @@ IMAGE_MAGIC = [
     b'RIFF',               # WebP
 ]
 
+VALID_CHROMOGENS = {"tmb", "opd", "pnpp", "abts", "grayscale"}
+VALID_ASSAY_TYPES = {"sandwich", "competitive"}
+VALID_WELL_RE = re.compile(r'^[A-H](?:[1-9]|1[0-2])$')
+
 
 def _validate_id(value: str, label: str = "ID") -> None:
     if not VALID_UUID_RE.match(value):
@@ -42,6 +46,118 @@ def _validate_id(value: str, label: str = "ID") -> None:
 
 def _is_valid_image(data: bytes) -> bool:
     return any(data[:len(m)] == m for m in IMAGE_MAGIC)
+
+
+def _validate_finite_values(values: List[float], label: str) -> None:
+    if any(not np.isfinite(v) for v in values):
+        raise HTTPException(status_code=400, detail=f"{label} must contain only finite numbers")
+
+
+def _parse_positions(raw: Optional[str], label: str) -> Optional[List[str]]:
+    if not raw:
+        return None
+    positions = [p.strip().upper() for p in raw.split(",") if p.strip()]
+    invalid = [p for p in positions if not VALID_WELL_RE.match(p)]
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"Invalid {label} well position(s): {', '.join(invalid)}")
+    return positions
+
+
+def _dataset_record_dir(plate_id: str) -> str:
+    return os.path.join(settings.DATASET_DIR, plate_id)
+
+
+def _dataset_metadata_path(plate_id: str) -> str:
+    return os.path.join(_dataset_record_dir(plate_id), "metadata.json")
+
+
+def _read_dataset_record(plate_id: str) -> Dict:
+    _validate_id(plate_id, "plate ID")
+    path = _dataset_metadata_path(plate_id)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Dataset plate record not found")
+    with open(path, "r") as f:
+        return json.load(f)
+
+
+def _write_dataset_record(record: Dict) -> None:
+    plate_id = record["plate_id"]
+    os.makedirs(_dataset_record_dir(plate_id), exist_ok=True)
+    with open(_dataset_metadata_path(plate_id), "w") as f:
+        json.dump(record, f, indent=2)
+
+
+def _extract_numeric(value: str) -> Optional[float]:
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    if not cleaned:
+        return None
+    cleaned = cleaned.replace(",", ".")
+    try:
+        number = float(cleaned)
+    except ValueError:
+        return None
+    return number if np.isfinite(number) else None
+
+
+def _parse_reader_csv(text: str) -> Dict[str, float]:
+    rows = list(csv.reader(io.StringIO(text)))
+    values: Dict[str, float] = {}
+
+    # Long format: well, od
+    for row in rows:
+        if len(row) < 2:
+            continue
+        well = row[0].strip().upper()
+        od = _extract_numeric(row[1])
+        if VALID_WELL_RE.match(well) and od is not None:
+            values[well] = od
+
+    if values:
+        return values
+
+    # Matrix format: optional header row with 1..12, then A-H rows.
+    for row in rows:
+        if len(row) < 13:
+            continue
+        row_label = row[0].strip().upper()
+        if row_label not in "ABCDEFGH":
+            continue
+        for col_idx in range(12):
+            od = _extract_numeric(row[col_idx + 1])
+            if od is not None:
+                values[f"{row_label}{col_idx + 1}"] = od
+
+    if values:
+        return values
+
+    # Vendor-style fallback: scan all adjacent cells for well/value pairs.
+    for row in rows:
+        for idx, cell in enumerate(row[:-1]):
+            well = cell.strip().upper()
+            od = _extract_numeric(row[idx + 1])
+            if VALID_WELL_RE.match(well) and od is not None:
+                values[well] = od
+
+    if not values:
+        raise HTTPException(status_code=400, detail="Could not parse any A1-H12 OD values from CSV")
+    return values
+
+
+def _dataset_summary(record: Dict) -> Dict:
+    return {
+        "plate_id": record["plate_id"],
+        "created_at": record["created_at"],
+        "study_name": record.get("study_name"),
+        "assay_name": record.get("assay_name"),
+        "operator": record.get("operator"),
+        "device_model": record.get("device_model"),
+        "chromogen": record.get("chromogen"),
+        "assay_type": record.get("assay_type"),
+        "has_reader_csv": bool(record.get("reader_csv")),
+        "reader_wells": len(record.get("reader_values", {})),
+    }
 
 
 class NumpySafeEncoder(json.JSONEncoder):
@@ -149,13 +265,22 @@ async def check_alignment(
 
 @router.post("/analyze", response_model=AnalysisResponse)
 async def analyze_plate(
+    request: Request,
     file: UploadFile = File(..., description="ELISA plate image"),
     negative_control: Optional[str] = Form(None, description="Comma-separated negative control positions"),
     positive_control: Optional[str] = Form(None, description="Comma-separated positive control positions"),
     chromogen: str = Form("tmb", description="Substrate: tmb, opd, pnpp, abts, grayscale"),
     assay_type: str = Form("sandwich", description="sandwich or competitive"),
 ):
-    _check_rate_limit("analyze")
+    client_host = request.client.host if request.client else "unknown"
+    _check_rate_limit(f"analyze:{client_host}")
+
+    chromogen = chromogen.lower().strip()
+    assay_type = assay_type.lower().strip()
+    if chromogen not in VALID_CHROMOGENS:
+        raise HTTPException(status_code=400, detail=f"Unsupported chromogen: {chromogen}")
+    if assay_type not in VALID_ASSAY_TYPES:
+        raise HTTPException(status_code=400, detail=f"Unsupported assay type: {assay_type}")
 
     if not file.content_type or not file.content_type.startswith('image/'):
         raise HTTPException(status_code=400, detail=f"File must be an image. Received: {file.content_type}")
@@ -166,13 +291,10 @@ async def analyze_plate(
     if not _is_valid_image(contents):
         raise HTTPException(status_code=400, detail="File does not appear to be a valid image")
 
-    def _parse_positions(raw: Optional[str]) -> Optional[List[str]]:
-        if not raw:
-            return None
-        return [p.strip().upper() for p in raw.split(",") if p.strip()]
-
-    neg_list = _parse_positions(negative_control)
-    pos_list = _parse_positions(positive_control)
+    neg_list = _parse_positions(negative_control, "negative control")
+    pos_list = _parse_positions(positive_control, "positive control")
+    if neg_list and pos_list and set(neg_list).intersection(pos_list):
+        raise HTTPException(status_code=400, detail="A well cannot be both a negative and positive control")
 
     analysis_id = str(uuid.uuid4())
     timestamp = datetime.utcnow().isoformat()
@@ -242,6 +364,10 @@ async def create_calibration(request: CalibrationRequest):
             status_code=400,
             detail="At least 3 calibration points required"
         )
+    _validate_finite_values(request.concentrations, "Concentrations")
+    _validate_finite_values(request.od_values, "OD values")
+    if any(c < 0 for c in request.concentrations):
+        raise HTTPException(status_code=400, detail="Concentrations must be non-negative")
 
     try:
         curve = calibration_service.fit_curve(
@@ -287,6 +413,7 @@ async def create_calibration(request: CalibrationRequest):
 @router.post("/quantify")
 async def quantify_samples(request: QuantifyRequest):
     _validate_id(request.calibration_id, "calibration ID")
+    _validate_finite_values(request.od_values, "OD values")
     calibration_path = os.path.join(settings.RESULTS_DIR, f"cal_{request.calibration_id}.json")
 
     if not os.path.exists(calibration_path):
@@ -369,6 +496,181 @@ async def delete_results(analysis_id: str):
         raise HTTPException(status_code=404, detail="Analysis not found")
 
     return {"message": f"Deleted {', '.join(deleted)}", "analysis_id": analysis_id}
+
+
+# ------------------------------------------------------------------
+# Dataset collection for validation / ML training
+# ------------------------------------------------------------------
+
+@router.post("/dataset/plates")
+async def create_dataset_plate(
+    file: UploadFile = File(..., description="Raw plate photo for dataset collection"),
+    study_name: str = Form("", description="Study or batch name"),
+    assay_name: str = Form("", description="Assay name"),
+    operator: str = Form("", description="Operator or lab mate identifier"),
+    device_model: str = Form("", description="Phone/camera model"),
+    lighting_condition: str = Form("", description="Lighting or fixture description"),
+    chromogen: str = Form("tmb", description="Substrate: tmb, opd, pnpp, abts, grayscale"),
+    assay_type: str = Form("sandwich", description="sandwich or competitive"),
+    notes: str = Form("", description="Free-text notes"),
+):
+    chromogen = chromogen.lower().strip()
+    assay_type = assay_type.lower().strip()
+    if chromogen not in VALID_CHROMOGENS:
+        raise HTTPException(status_code=400, detail=f"Unsupported chromogen: {chromogen}")
+    if assay_type not in VALID_ASSAY_TYPES:
+        raise HTTPException(status_code=400, detail=f"Unsupported assay type: {assay_type}")
+    if not file.content_type or not file.content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="File must be an image")
+
+    contents = await file.read()
+    if len(contents) > settings.MAX_UPLOAD_SIZE:
+        raise HTTPException(status_code=413, detail=f"File too large. Max {settings.MAX_UPLOAD_SIZE // (1024 * 1024)}MB")
+    if not _is_valid_image(contents):
+        raise HTTPException(status_code=400, detail="File does not appear to be a valid image")
+
+    plate_id = str(uuid.uuid4())
+    created_at = datetime.utcnow().isoformat()
+    ext = os.path.splitext(file.filename or "plate.jpg")[1].lower() or ".jpg"
+    if ext not in {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}:
+        ext = ".jpg"
+
+    record_dir = _dataset_record_dir(plate_id)
+    os.makedirs(record_dir, exist_ok=True)
+    image_filename = f"plate{ext}"
+    image_path = os.path.join(record_dir, image_filename)
+    with open(image_path, "wb") as f:
+        f.write(contents)
+
+    record = {
+        "plate_id": plate_id,
+        "created_at": created_at,
+        "updated_at": created_at,
+        "image_filename": image_filename,
+        "image_path": image_path,
+        "study_name": study_name.strip(),
+        "assay_name": assay_name.strip(),
+        "operator": operator.strip(),
+        "device_model": device_model.strip(),
+        "lighting_condition": lighting_condition.strip(),
+        "chromogen": chromogen,
+        "assay_type": assay_type,
+        "notes": notes.strip(),
+        "reader_csv": None,
+        "reader_values": {},
+    }
+    _write_dataset_record(record)
+    return record
+
+
+@router.get("/dataset/plates")
+async def list_dataset_plates():
+    os.makedirs(settings.DATASET_DIR, exist_ok=True)
+    records = []
+    for plate_id in os.listdir(settings.DATASET_DIR):
+        path = _dataset_metadata_path(plate_id)
+        if os.path.exists(path):
+            with open(path, "r") as f:
+                records.append(_dataset_summary(json.load(f)))
+    records.sort(key=lambda r: r["created_at"], reverse=True)
+    return {"plates": records}
+
+
+@router.get("/dataset/plates/{plate_id}")
+async def get_dataset_plate(plate_id: str):
+    return _read_dataset_record(plate_id)
+
+
+@router.post("/dataset/plates/{plate_id}/reader-csv")
+async def attach_reader_csv(
+    plate_id: str,
+    file: Optional[UploadFile] = File(None, description="Plate-reader CSV file"),
+    csv_text: Optional[str] = Form(None, description="Plate-reader CSV text"),
+):
+    record = _read_dataset_record(plate_id)
+    if file is None and not csv_text:
+        raise HTTPException(status_code=400, detail="Provide either a CSV file or csv_text")
+
+    if file is not None:
+        raw = await file.read()
+        if len(raw) > settings.MAX_UPLOAD_SIZE:
+            raise HTTPException(status_code=413, detail=f"CSV too large. Max {settings.MAX_UPLOAD_SIZE // (1024 * 1024)}MB")
+        text = raw.decode("utf-8-sig")
+        original_filename = file.filename or "reader.csv"
+    else:
+        text = csv_text or ""
+        original_filename = "pasted_reader.csv"
+
+    reader_values = _parse_reader_csv(text)
+    raw_path = os.path.join(_dataset_record_dir(plate_id), "reader_raw.csv")
+    values_path = os.path.join(_dataset_record_dir(plate_id), "reader_values.json")
+    with open(raw_path, "w", newline="") as f:
+        f.write(text)
+    with open(values_path, "w") as f:
+        json.dump(reader_values, f, indent=2)
+
+    expected = {f"{row}{col}" for row in "ABCDEFGH" for col in range(1, 13)}
+    present = set(reader_values.keys())
+    record["reader_csv"] = {
+        "filename": original_filename,
+        "stored_filename": "reader_raw.csv",
+        "attached_at": datetime.utcnow().isoformat(),
+    }
+    record["reader_values"] = reader_values
+    record["reader_missing_wells"] = sorted(expected - present)
+    record["reader_extra_wells"] = sorted(present - expected)
+    record["updated_at"] = datetime.utcnow().isoformat()
+    _write_dataset_record(record)
+
+    return {
+        "plate_id": plate_id,
+        "parsed_wells": len(reader_values),
+        "missing_wells": record["reader_missing_wells"],
+        "record": record,
+    }
+
+
+@router.get("/dataset/manifest.csv")
+async def export_dataset_manifest():
+    """Export one row per labeled well for downstream ML/data-science work."""
+    os.makedirs(settings.DATASET_DIR, exist_ok=True)
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        "plate_id", "well", "reader_od", "image_path", "study_name", "assay_name",
+        "operator", "device_model", "lighting_condition", "chromogen", "assay_type",
+        "created_at", "notes",
+    ])
+
+    for plate_id in sorted(os.listdir(settings.DATASET_DIR)):
+        path = _dataset_metadata_path(plate_id)
+        if not os.path.exists(path):
+            continue
+        with open(path, "r") as f:
+            record = json.load(f)
+        for well, reader_od in sorted(record.get("reader_values", {}).items()):
+            writer.writerow([
+                record["plate_id"],
+                well,
+                reader_od,
+                record.get("image_path", ""),
+                record.get("study_name", ""),
+                record.get("assay_name", ""),
+                record.get("operator", ""),
+                record.get("device_model", ""),
+                record.get("lighting_condition", ""),
+                record.get("chromogen", ""),
+                record.get("assay_type", ""),
+                record.get("created_at", ""),
+                record.get("notes", ""),
+            ])
+
+    buf.seek(0)
+    return StreamingResponse(
+        buf,
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="elisa_dataset_manifest.csv"'},
+    )
 
 
 # ------------------------------------------------------------------
@@ -493,5 +795,9 @@ class ReplicateRequest(BaseModel):
 
 @router.post("/replicate-stats")
 async def compute_replicate_stats(request: ReplicateRequest):
+    for label, positions in request.groups.items():
+        invalid = [p for p in positions if not VALID_WELL_RE.match(p.upper())]
+        if invalid:
+            raise HTTPException(status_code=400, detail=f"Invalid replicate well position(s) in {label}: {', '.join(invalid)}")
     stats = PlateAnalyzer.compute_replicate_stats(request.wells, request.groups)
     return {"stats": stats}

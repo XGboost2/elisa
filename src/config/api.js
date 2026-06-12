@@ -18,4 +18,6 @@ export const ENDPOINTS = {
     EXPORT: '/export',
     SERIAL_DILUTION: '/serial-dilution',
     REPLICATE_STATS: '/replicate-stats',
+    DATASET_PLATES: '/dataset/plates',
+    DATASET_MANIFEST: '/dataset/manifest.csv',
 };

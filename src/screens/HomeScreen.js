@@ -1,7 +1,7 @@
 /**
  * Home screen - main dashboard
  */
-import React, { useState, useEffect } from 'react';
+import React from 'react';
 import {
     View,
     Text,
@@ -9,23 +9,72 @@ import {
     TouchableOpacity,
     ScrollView,
     Alert,
+    useWindowDimensions,
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as ImagePicker from 'expo-image-picker';
 import theme from '../styles/theme';
-import { testConnection } from '../services/apiClient';
+
+const PLATE_ROWS = 'ABCDEFGH'.split('');
+const PLATE_COLS = Array.from({ length: 12 }, (_, index) => index + 1);
+
+const workflows = [
+    {
+        title: 'Offline OD Scan',
+        metric: '96 wells',
+        detail: 'Uniform plate sampling with chromogen-specific color scoring.',
+    },
+    {
+        title: 'Calibration',
+        metric: 'linear / poly',
+        detail: 'Create standard curves and quantify unknown sample wells.',
+    },
+    {
+        title: 'ML Dataset',
+        metric: 'reader CSV',
+        detail: 'Collect raw photos and attach plate-reader labels later.',
+    },
+];
+
+const qualityItems = [
+    'TMB, OPD, pNPP, ABTS, and grayscale modes',
+    'Control normalization and edge-effect checks',
+    'CSV exports for analysis and documentation',
+];
+
+function WellPreview() {
+    return (
+        <View style={styles.previewPlate}>
+            {PLATE_ROWS.map((row, rowIndex) => (
+                <View key={row} style={styles.previewRow}>
+                    {PLATE_COLS.map(col => {
+                        const signal = (rowIndex * 13 + col * 7) % 100;
+                        return (
+                            <View
+                                key={`${row}${col}`}
+                                style={[
+                                    styles.previewWell,
+                                    {
+                                        opacity: 0.35 + signal / 160,
+                                        backgroundColor: signal > 65
+                                            ? '#2f80ed'
+                                            : signal > 35
+                                                ? '#62c6c8'
+                                                : '#d7eef5',
+                                    },
+                                ]}
+                            />
+                        );
+                    })}
+                </View>
+            ))}
+        </View>
+    );
+}
 
 export default function HomeScreen({ navigation }) {
-    const [backendStatus, setBackendStatus] = useState('checking');
-
-    useEffect(() => {
-        checkBackend();
-    }, []);
-
-    const checkBackend = async () => {
-        const isConnected = await testConnection();
-        setBackendStatus(isConnected ? 'connected' : 'disconnected');
-    };
+    const { width } = useWindowDimensions();
+    const isWide = width >= 760;
 
     const handleCapturePress = () => {
         navigation.navigate('Camera');
@@ -56,127 +105,113 @@ export default function HomeScreen({ navigation }) {
     };
 
     return (
-        <ScrollView style={styles.scrollView}>
+        <ScrollView style={styles.scrollView} contentContainerStyle={styles.content}>
             <StatusBar style="dark" />
 
-            {/* Header */}
-            <View style={styles.header}>
+            <View style={styles.topBar}>
                 <View>
-                    <Text style={styles.title}>ELISA Analyzer</Text>
-                    <Text style={styles.subtitle}>Camera-based plate analysis</Text>
+                    <Text style={styles.brand}>ELISA Analyzer</Text>
+                    <Text style={styles.brandSub}>Camera-based plate analysis</Text>
                 </View>
 
-                {/* Backend status indicator */}
-                <View style={styles.statusContainer}>
-                    <View style={[
-                        styles.statusDot,
-                        {
-                            backgroundColor: backendStatus === 'connected'
-                                ? theme.colors.success
-                                : theme.colors.error
-                        }
-                    ]} />
-                    <Text style={styles.statusText}>
-                        {backendStatus === 'checking' ? 'Checking...' :
-                            backendStatus === 'connected' ? 'Connected' : 'Offline'}
-                    </Text>
+                <View style={styles.statusPill}>
+                    <View style={styles.statusDot} />
+                    <Text style={styles.statusText}>Offline Ready</Text>
                 </View>
             </View>
 
-            {/* Backend warning */}
-            {backendStatus !== 'connected' && (
-                <View style={styles.warningBanner}>
-                    <Text style={styles.warningText}>
-                        ⚠️ Backend server not connected. Please start the Python backend.
+            <View style={[styles.hero, isWide && styles.heroWide]}>
+                <View style={[styles.heroCopy, isWide && styles.heroCopyWide]}>
+                    <Text style={styles.kicker}>Research Use Only</Text>
+                    <Text style={styles.title}>Read ELISA plates from a phone photo.</Text>
+                    <Text style={styles.subtitle}>
+                        Capture, analyze, calibrate, and export 96-well plate data without a backend connection.
                     </Text>
-                    <TouchableOpacity onPress={checkBackend}>
-                        <Text style={styles.retryText}>Retry</Text>
-                    </TouchableOpacity>
-                </View>
-            )}
 
-            {/* Main action */}
-            <View style={styles.mainAction}>
+                    <View style={[styles.actionRow, !isWide && styles.actionRowStacked]}>
+                        <TouchableOpacity style={styles.primaryAction} onPress={handleCapturePress}>
+                            <Text style={styles.primaryActionIcon}>◉</Text>
+                            <View style={styles.actionTextBlock}>
+                                <Text style={styles.primaryActionText}>Capture Plate</Text>
+                                <Text style={styles.primaryActionSubtext}>Open camera</Text>
+                            </View>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity style={styles.secondaryAction} onPress={handleUploadPress}>
+                            <Text style={styles.secondaryActionIcon}>↑</Text>
+                            <View style={styles.actionTextBlock}>
+                                <Text style={styles.secondaryActionText}>Upload Photo</Text>
+                                <Text style={styles.secondaryActionSubtext}>Choose image</Text>
+                            </View>
+                        </TouchableOpacity>
+                    </View>
+                </View>
+
+                <View style={[styles.previewPanel, isWide && styles.previewPanelWide]}>
+                    <View style={styles.previewHeader}>
+                        <Text style={styles.previewTitle}>TMB Plate Preview</Text>
+                        <Text style={styles.previewBadge}>96 wells</Text>
+                    </View>
+                    <WellPreview />
+                    <View style={styles.previewStatsRow}>
+                        <View style={styles.previewStat}>
+                            <Text style={styles.previewStatValue}>0.84</Text>
+                            <Text style={styles.previewStatLabel}>mean OD</Text>
+                        </View>
+                        <View style={styles.previewStat}>
+                            <Text style={styles.previewStatValue}>7.2%</Text>
+                            <Text style={styles.previewStatLabel}>edge delta</Text>
+                        </View>
+                        <View style={styles.previewStat}>
+                            <Text style={styles.previewStatValue}>pass</Text>
+                            <Text style={styles.previewStatLabel}>QC</Text>
+                        </View>
+                    </View>
+                </View>
+            </View>
+
+            <View style={[styles.workflowGrid, isWide && styles.workflowGridWide]}>
+                {workflows.map(item => (
+                    <View key={item.title} style={[styles.workflowCard, isWide && styles.workflowCardWide]}>
+                        <Text style={styles.workflowMetric}>{item.metric}</Text>
+                        <Text style={styles.workflowTitle}>{item.title}</Text>
+                        <Text style={styles.workflowDetail}>{item.detail}</Text>
+                    </View>
+                ))}
+            </View>
+
+            <View style={[styles.datasetBand, isWide && styles.datasetBandWide]}>
+                <View style={styles.datasetCopy}>
+                    <Text style={styles.datasetTitle}>Build a labeled validation set</Text>
+                    <Text style={styles.datasetText}>
+                        Save plate photos with assay metadata, then attach spectrophotometer CSV labels when they are ready.
+                    </Text>
+                </View>
                 <TouchableOpacity
-                    style={styles.captureButton}
-                    onPress={handleCapturePress}
+                    style={styles.datasetAction}
+                    onPress={() => navigation.navigate('Dataset')}
                 >
-                    <Text style={styles.captureIcon}>📸</Text>
-                    <Text style={styles.captureText}>Capture Plate</Text>
-                    <Text style={styles.captureSubtext}>
-                        Take a photo with camera
-                    </Text>
-                </TouchableOpacity>
-
-                <TouchableOpacity
-                    style={styles.uploadButton}
-                    onPress={handleUploadPress}
-                >
-                    <Text style={styles.uploadIcon}>📁</Text>
-                    <Text style={styles.uploadText}>Upload Photo</Text>
-                    <Text style={styles.uploadSubtext}>
-                        Analyze existing images
-                    </Text>
+                    <Text style={styles.datasetActionText}>Collect ML Dataset</Text>
                 </TouchableOpacity>
             </View>
 
-            {/* Features grid */}
-            <View style={styles.featuresContainer}>
-                <Text style={styles.sectionTitle}>Features</Text>
-
-                <View style={styles.featuresGrid}>
-                    <View style={styles.featureCard}>
-                        <Text style={styles.featureIcon}>🔬</Text>
-                        <Text style={styles.featureTitle}>Automated Detection</Text>
-                        <Text style={styles.featureDescription}>
-                            Detects 96-well grid automatically
-                        </Text>
-                    </View>
-
-                    <View style={styles.featureCard}>
-                        <Text style={styles.featureIcon}>📊</Text>
-                        <Text style={styles.featureTitle}>OD Calculation</Text>
-                        <Text style={styles.featureDescription}>
-                            Calculates optical density for each well
-                        </Text>
-                    </View>
-
-                    <View style={styles.featureCard}>
-                        <Text style={styles.featureIcon}>📈</Text>
-                        <Text style={styles.featureTitle}>Calibration</Text>
-                        <Text style={styles.featureDescription}>
-                            Multiple curve fitting options
-                        </Text>
-                    </View>
-
-                    <View style={styles.featureCard}>
-                        <Text style={styles.featureIcon}>💾</Text>
-                        <Text style={styles.featureTitle}>Export Data</Text>
-                        <Text style={styles.featureDescription}>
-                            Export results to CSV/PDF
-                        </Text>
-                    </View>
+            <View style={[styles.detailsGrid, isWide && styles.detailsGridWide]}>
+                <View style={[styles.detailPanel, isWide && styles.detailPanelWide]}>
+                    <Text style={styles.detailTitle}>Analysis Checks</Text>
+                    {qualityItems.map(item => (
+                        <View key={item} style={styles.checkRow}>
+                            <View style={styles.checkMark} />
+                            <Text style={styles.checkText}>{item}</Text>
+                        </View>
+                    ))}
                 </View>
-            </View>
 
-            {/* Quick info */}
-            <View style={styles.infoCard}>
-                <Text style={styles.infoTitle}>How it works</Text>
-                <Text style={styles.infoText}>
-                    1. 📸 Capture a clear photo of your ELISA plate{'\n'}
-                    2. 🔍 AI detects the wells and analyzes colors{'\n'}
-                    3. 📊 View optical density heatmap{'\n'}
-                    4. 📈 Create calibration curves (optional){'\n'}
-                    5. 💾 Export results for your records
-                </Text>
-            </View>
-
-            {/* Disclaimer */}
-            <View style={styles.disclaimerBox}>
-                <Text style={styles.disclaimerText}>
-                    For Research Use Only — Not for Clinical Diagnostics.{'\n'}
-                    Camera-based readings have lower precision than dedicated plate readers.
-                </Text>
+                <View style={[styles.detailPanel, styles.noticePanel, isWide && styles.detailPanelWide]}>
+                    <Text style={styles.noticeTitle}>Research workflow</Text>
+                    <Text style={styles.noticeText}>
+                        Camera-derived values are useful for screening and validation workflows. Confirm critical measurements with a calibrated plate reader.
+                    </Text>
+                </View>
             </View>
 
             <View style={styles.bottomSpacer} />
@@ -187,178 +222,379 @@ export default function HomeScreen({ navigation }) {
 const styles = StyleSheet.create({
     scrollView: {
         flex: 1,
-        backgroundColor: theme.colors.background,
+        backgroundColor: '#f6f8fb',
     },
-    header: {
-        padding: theme.spacing.lg,
-        paddingTop: 60,
-        backgroundColor: theme.colors.white,
-        ...theme.shadows.sm,
+    content: {
+        paddingBottom: theme.spacing.xxl,
     },
-    title: {
-        fontSize: theme.typography.h3,
+    topBar: {
+        paddingHorizontal: theme.spacing.lg,
+        paddingTop: 58,
+        paddingBottom: theme.spacing.md,
+        backgroundColor: '#f6f8fb',
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+    },
+    brand: {
+        fontSize: theme.typography.h5,
         fontWeight: '700',
-        color: theme.colors.primary,
+        color: '#132238',
     },
-    subtitle: {
-        fontSize: theme.typography.body1,
-        color: theme.colors.textSecondary,
-        marginTop: theme.spacing.xs,
+    brandSub: {
+        fontSize: theme.typography.caption,
+        color: '#65758b',
+        marginTop: 2,
     },
-    statusContainer: {
-        position: 'absolute',
-        top: 60,
-        right: theme.spacing.lg,
+    statusPill: {
         flexDirection: 'row',
         alignItems: 'center',
+        borderWidth: 1,
+        borderColor: '#d7e2ec',
+        borderRadius: theme.borderRadius.round,
+        paddingHorizontal: theme.spacing.sm,
+        paddingVertical: 6,
+        backgroundColor: theme.colors.white,
     },
     statusDot: {
         width: 8,
         height: 8,
         borderRadius: 4,
-        marginRight: theme.spacing.xs,
+        backgroundColor: '#2eb67d',
+        marginRight: 6,
     },
     statusText: {
         fontSize: theme.typography.caption,
-        color: theme.colors.textSecondary,
-    },
-    warningBanner: {
-        backgroundColor: theme.colors.accentLight,
-        padding: theme.spacing.md,
-        marginTop: theme.spacing.sm,
-        flexDirection: 'row',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-    },
-    warningText: {
-        flex: 1,
-        fontSize: theme.typography.caption,
-        color: theme.colors.gray900,
-    },
-    retryText: {
-        fontSize: theme.typography.caption,
-        color: theme.colors.primary,
+        color: '#334155',
         fontWeight: '600',
-        paddingLeft: theme.spacing.sm,
     },
-    mainAction: {
-        padding: theme.spacing.lg,
+    hero: {
+        marginHorizontal: theme.spacing.lg,
+        paddingVertical: theme.spacing.lg,
     },
-    captureButton: {
-        backgroundColor: theme.colors.primary,
-        borderRadius: theme.borderRadius.xl,
-        padding: theme.spacing.xl,
+    heroWide: {
+        flexDirection: 'row',
         alignItems: 'center',
-        ...theme.shadows.lg,
+        gap: theme.spacing.lg,
     },
-    captureIcon: {
-        fontSize: 64,
+    heroCopy: {
+        marginBottom: theme.spacing.lg,
+    },
+    heroCopyWide: {
+        flex: 1.05,
+        marginBottom: 0,
+    },
+    kicker: {
+        alignSelf: 'flex-start',
+        color: '#0f766e',
+        backgroundColor: '#dff7f2',
+        borderRadius: theme.borderRadius.round,
+        overflow: 'hidden',
+        paddingHorizontal: theme.spacing.sm,
+        paddingVertical: 5,
+        fontSize: theme.typography.caption,
+        fontWeight: '700',
         marginBottom: theme.spacing.md,
     },
-    captureText: {
-        fontSize: theme.typography.h4,
-        color: theme.colors.white,
-        fontWeight: '600',
+    title: {
+        fontSize: 38,
+        lineHeight: 44,
+        color: '#101828',
+        fontWeight: '800',
+        maxWidth: 620,
     },
-    captureSubtext: {
-        fontSize: theme.typography.body2,
-        color: theme.colors.primaryLight,
-        marginTop: theme.spacing.xs,
-    },
-    uploadButton: {
-        backgroundColor: theme.colors.secondary,
-        borderRadius: theme.borderRadius.xl,
-        padding: theme.spacing.lg,
+    subtitle: {
+        fontSize: theme.typography.body1,
+        lineHeight: 24,
+        color: '#536579',
         marginTop: theme.spacing.md,
+        maxWidth: 560,
+    },
+    actionRow: {
+        flexDirection: 'row',
+        gap: theme.spacing.md,
+        marginTop: theme.spacing.lg,
+    },
+    actionRowStacked: {
+        flexDirection: 'column',
+    },
+    primaryAction: {
+        minHeight: 72,
+        flex: 1,
+        backgroundColor: '#1769e0',
+        borderRadius: theme.borderRadius.md,
+        paddingHorizontal: theme.spacing.md,
+        paddingVertical: theme.spacing.md,
+        flexDirection: 'row',
         alignItems: 'center',
         ...theme.shadows.md,
     },
-    uploadIcon: {
-        fontSize: 48,
-        marginBottom: theme.spacing.sm,
+    secondaryAction: {
+        minHeight: 72,
+        flex: 1,
+        backgroundColor: theme.colors.white,
+        borderWidth: 1,
+        borderColor: '#d7e2ec',
+        borderRadius: theme.borderRadius.md,
+        paddingHorizontal: theme.spacing.md,
+        paddingVertical: theme.spacing.md,
+        flexDirection: 'row',
+        alignItems: 'center',
     },
-    uploadText: {
-        fontSize: theme.typography.h5,
+    primaryActionIcon: {
+        width: 34,
+        height: 34,
+        borderRadius: 17,
+        overflow: 'hidden',
+        textAlign: 'center',
+        lineHeight: 34,
+        backgroundColor: 'rgba(255,255,255,0.18)',
         color: theme.colors.white,
-        fontWeight: '600',
+        fontSize: 19,
+        marginRight: theme.spacing.sm,
     },
-    uploadSubtext: {
-        fontSize: theme.typography.body2,
-        color: 'rgba(255, 255, 255, 0.8)',
-        marginTop: theme.spacing.xs,
+    secondaryActionIcon: {
+        width: 34,
+        height: 34,
+        borderRadius: 17,
+        overflow: 'hidden',
+        textAlign: 'center',
+        lineHeight: 32,
+        borderWidth: 1,
+        borderColor: '#c8d5e3',
+        color: '#1769e0',
+        fontSize: 22,
+        marginRight: theme.spacing.sm,
     },
-    featuresContainer: {
-        padding: theme.spacing.lg,
-        paddingTop: theme.spacing.md,
+    actionTextBlock: {
+        flex: 1,
     },
-    sectionTitle: {
-        fontSize: theme.typography.h5,
-        fontWeight: '600',
-        color: theme.colors.textPrimary,
+    primaryActionText: {
+        color: theme.colors.white,
+        fontSize: theme.typography.body1,
+        fontWeight: '700',
+    },
+    primaryActionSubtext: {
+        color: '#dbeafe',
+        fontSize: theme.typography.caption,
+        marginTop: 2,
+    },
+    secondaryActionText: {
+        color: '#132238',
+        fontSize: theme.typography.body1,
+        fontWeight: '700',
+    },
+    secondaryActionSubtext: {
+        color: '#65758b',
+        fontSize: theme.typography.caption,
+        marginTop: 2,
+    },
+    previewPanel: {
+        backgroundColor: theme.colors.white,
+        borderRadius: theme.borderRadius.md,
+        borderWidth: 1,
+        borderColor: '#dce6ef',
+        padding: theme.spacing.md,
+        ...theme.shadows.md,
+    },
+    previewPanelWide: {
+        flex: 0.95,
+    },
+    previewHeader: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
         marginBottom: theme.spacing.md,
     },
-    featuresGrid: {
-        flexDirection: 'row',
-        flexWrap: 'wrap',
+    previewTitle: {
+        color: '#132238',
+        fontSize: theme.typography.body1,
+        fontWeight: '700',
+    },
+    previewBadge: {
+        color: '#1769e0',
+        fontSize: theme.typography.caption,
+        fontWeight: '700',
+        backgroundColor: '#eaf2ff',
+        borderRadius: theme.borderRadius.round,
+        overflow: 'hidden',
+        paddingHorizontal: theme.spacing.sm,
+        paddingVertical: 4,
+    },
+    previewPlate: {
+        aspectRatio: 1.48,
+        borderRadius: theme.borderRadius.md,
+        borderWidth: 1,
+        borderColor: '#cad7e4',
+        backgroundColor: '#f8fbfd',
+        padding: theme.spacing.sm,
         justifyContent: 'space-between',
     },
-    featureCard: {
-        width: '48%',
-        backgroundColor: theme.colors.white,
-        borderRadius: theme.borderRadius.lg,
-        padding: theme.spacing.md,
-        marginBottom: theme.spacing.md,
-        ...theme.shadows.sm,
+    previewRow: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
     },
-    featureIcon: {
-        fontSize: 32,
+    previewWell: {
+        width: '6.7%',
+        aspectRatio: 1,
+        borderRadius: theme.borderRadius.round,
+        borderWidth: 1,
+        borderColor: 'rgba(19,34,56,0.08)',
+    },
+    previewStatsRow: {
+        flexDirection: 'row',
+        gap: theme.spacing.sm,
+        marginTop: theme.spacing.md,
+    },
+    previewStat: {
+        flex: 1,
+        borderRadius: theme.borderRadius.md,
+        backgroundColor: '#f6f8fb',
+        paddingVertical: theme.spacing.sm,
+        paddingHorizontal: theme.spacing.sm,
+    },
+    previewStatValue: {
+        color: '#132238',
+        fontSize: theme.typography.h6,
+        fontWeight: '800',
+    },
+    previewStatLabel: {
+        color: '#65758b',
+        fontSize: theme.typography.caption,
+        marginTop: 2,
+    },
+    workflowGrid: {
+        paddingHorizontal: theme.spacing.lg,
+        gap: theme.spacing.md,
+    },
+    workflowGridWide: {
+        flexDirection: 'row',
+    },
+    workflowCard: {
+        backgroundColor: theme.colors.white,
+        borderWidth: 1,
+        borderColor: '#dce6ef',
+        borderRadius: theme.borderRadius.md,
+        padding: theme.spacing.md,
+    },
+    workflowCardWide: {
+        flex: 1,
+    },
+    workflowMetric: {
+        color: '#0f766e',
+        fontSize: theme.typography.caption,
+        fontWeight: '800',
+        marginBottom: theme.spacing.sm,
+        textTransform: 'uppercase',
+    },
+    workflowTitle: {
+        color: '#132238',
+        fontSize: theme.typography.h6,
+        fontWeight: '800',
+    },
+    workflowDetail: {
+        color: '#65758b',
+        fontSize: theme.typography.body2,
+        lineHeight: 20,
+        marginTop: theme.spacing.xs,
+    },
+    datasetBand: {
+        margin: theme.spacing.lg,
+        borderRadius: theme.borderRadius.md,
+        backgroundColor: '#132238',
+        padding: theme.spacing.lg,
+    },
+    datasetBandWide: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+    },
+    datasetCopy: {
+        flex: 1,
+        paddingRight: theme.spacing.md,
+    },
+    datasetTitle: {
+        color: theme.colors.white,
+        fontSize: theme.typography.h5,
+        fontWeight: '800',
+    },
+    datasetText: {
+        color: '#c7d7e8',
+        fontSize: theme.typography.body2,
+        lineHeight: 21,
+        marginTop: theme.spacing.xs,
+    },
+    datasetAction: {
+        marginTop: theme.spacing.md,
+        backgroundColor: '#54d6c2',
+        borderRadius: theme.borderRadius.md,
+        paddingHorizontal: theme.spacing.lg,
+        paddingVertical: theme.spacing.md,
+        alignItems: 'center',
+    },
+    datasetActionText: {
+        color: '#062522',
+        fontSize: theme.typography.button,
+        fontWeight: '800',
+    },
+    detailsGrid: {
+        paddingHorizontal: theme.spacing.lg,
+        gap: theme.spacing.md,
+    },
+    detailsGridWide: {
+        flexDirection: 'row',
+    },
+    detailPanel: {
+        backgroundColor: theme.colors.white,
+        borderRadius: theme.borderRadius.md,
+        borderWidth: 1,
+        borderColor: '#dce6ef',
+        padding: theme.spacing.md,
+    },
+    detailPanelWide: {
+        flex: 1,
+    },
+    detailTitle: {
+        color: '#132238',
+        fontSize: theme.typography.h6,
+        fontWeight: '800',
         marginBottom: theme.spacing.sm,
     },
-    featureTitle: {
-        fontSize: theme.typography.body1,
-        fontWeight: '600',
-        color: theme.colors.textPrimary,
+    checkRow: {
+        flexDirection: 'row',
+        alignItems: 'flex-start',
+        marginTop: theme.spacing.sm,
+    },
+    checkMark: {
+        width: 8,
+        height: 8,
+        borderRadius: 4,
+        backgroundColor: '#2eb67d',
+        marginTop: 6,
+        marginRight: theme.spacing.sm,
+    },
+    checkText: {
+        flex: 1,
+        color: '#536579',
+        fontSize: theme.typography.body2,
+        lineHeight: 20,
+    },
+    noticePanel: {
+        backgroundColor: '#fff8ed',
+        borderColor: '#f3d6a4',
+    },
+    noticeTitle: {
+        color: '#7a4b00',
+        fontSize: theme.typography.h6,
+        fontWeight: '800',
         marginBottom: theme.spacing.xs,
     },
-    featureDescription: {
-        fontSize: theme.typography.caption,
-        color: theme.colors.textSecondary,
-        lineHeight: 16,
-    },
-    infoCard: {
-        backgroundColor: theme.colors.primaryLight,
-        margin: theme.spacing.lg,
-        marginTop: 0,
-        padding: theme.spacing.md,
-        borderRadius: theme.borderRadius.lg,
-    },
-    infoTitle: {
-        fontSize: theme.typography.h6,
-        fontWeight: '600',
-        color: theme.colors.primaryDark,
-        marginBottom: theme.spacing.sm,
-    },
-    infoText: {
+    noticeText: {
+        color: '#755321',
         fontSize: theme.typography.body2,
-        color: theme.colors.gray900,
-        lineHeight: 22,
-    },
-    disclaimerBox: {
-        margin: theme.spacing.lg,
-        marginTop: 0,
-        padding: theme.spacing.md,
-        backgroundColor: theme.colors.accentLight,
-        borderRadius: theme.borderRadius.lg,
-        borderLeftWidth: 4,
-        borderLeftColor: theme.colors.warning,
-    },
-    disclaimerText: {
-        fontSize: theme.typography.caption,
-        color: theme.colors.gray900,
-        lineHeight: 18,
-        textAlign: 'center',
+        lineHeight: 21,
     },
     bottomSpacer: {
-        height: theme.spacing.xxl,
+        height: theme.spacing.xl,
     },
 });

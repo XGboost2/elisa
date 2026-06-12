@@ -66,10 +66,25 @@ class CalibrationService:
         """
         x = np.array(concentrations)
         y = np.array(od_values)
+
+        if len(x) != len(y):
+            raise ValueError("Concentrations and OD values must have the same length")
+        if len(x) < 3:
+            raise ValueError("At least 3 calibration points are required")
+        if not np.all(np.isfinite(x)) or not np.all(np.isfinite(y)):
+            raise ValueError("Calibration data must contain only finite values")
+        if np.any(x < 0):
+            raise ValueError("Concentrations must be non-negative")
+
+        order = np.argsort(x)
+        x = x[order]
+        y = y[order]
         
         if curve_type == 'auto':
             # Try different models and select best fit
-            models = ['linear', 'polynomial', '4pl']
+            models = ['linear', 'polynomial']
+            if len(x) >= 5 and np.all(x > 0):
+                models.append('4pl')
             best_curve = None
             best_r2 = -np.inf
             
@@ -119,6 +134,8 @@ class CalibrationService:
             
         elif curve_type == 'logarithmic':
             # Logarithmic: y = a*log(x) + b
+            if np.any(x <= 0):
+                raise ValueError("Logarithmic calibration requires positive concentrations")
             log_x = np.log10(x + 1e-10)  # Avoid log(0)
             slope, intercept, r_value, _, _ = stats.linregress(log_x, y)
             coefficients = [slope, intercept]
@@ -126,6 +143,11 @@ class CalibrationService:
             equation = f"OD = {slope:.4f} * log([C]) + {intercept:.4f}"
             
         elif curve_type == '4pl':
+            if len(x) < 5:
+                raise ValueError("4PL calibration requires at least 5 standard points")
+            if np.any(x <= 0):
+                raise ValueError("4PL calibration requires positive concentrations")
+
             # Four-parameter logistic
             # Initial parameter guesses
             a_init = np.min(y)
@@ -140,6 +162,10 @@ class CalibrationService:
                     self.four_parameter_logistic,
                     x, y,
                     p0=p0,
+                    bounds=(
+                        [-np.inf, -10.0, np.min(x) * 1e-6, -np.inf],
+                        [np.inf, 10.0, np.max(x) * 1e6, np.inf],
+                    ),
                     maxfev=10000
                 )
                 

@@ -19,15 +19,15 @@ from utils.image_preprocessing import (
     assess_image_quality
 )
 
-# BGR channel indices for chromogen-specific measurement.
-# Using the substrate's absorption channel gives better dynamic range
-# than grayscale (research shows ~2× improvement for TMB blue channel).
+# BGR channel indices / color-opponent signals for chromogen-specific measurement.
+# Camera photos are reflective images, not transmitted absorbance readings. For
+# visible blue TMB, higher signal means stronger blue color development.
 CHROMOGENS = {
-    "tmb":       {"channel": 0, "ref_channel": 2, "label": "TMB (450 nm)"},
-    "opd":       {"channel": 1, "ref_channel": 2, "label": "OPD (492 nm)"},
-    "pnpp":      {"channel": 0, "ref_channel": 2, "label": "pNPP (405 nm)"},
-    "abts":      {"channel": 1, "ref_channel": 2, "label": "ABTS (405 nm)"},
-    "grayscale": {"channel": None, "ref_channel": None, "label": "Grayscale"},
+    "tmb":       {"signal": "blue_excess", "label": "TMB blue"},
+    "opd":       {"signal": "orange_excess", "label": "OPD orange"},
+    "pnpp":      {"signal": "yellow_excess", "label": "pNPP yellow"},
+    "abts":      {"signal": "green_excess", "label": "ABTS green"},
+    "grayscale": {"signal": "darkness", "label": "Grayscale darkness"},
 }
 
 DEFAULT_CHROMOGEN = "tmb"
@@ -147,8 +147,10 @@ class PlateAnalyzer:
 
     def _create_uniform_grid(self, width: int, height: int) -> Tuple[List[int], List[int]]:
         """Create uniform well grid for a perspective-corrected plate image."""
-        mx = width * 0.05
-        my = height * 0.05
+        # Plate corners include the full plastic footprint, while well centers
+        # are substantially inset from the outer border.
+        mx = width * 0.11
+        my = height * 0.12
         rs = (height - 2 * my) / (self.rows - 1)
         cs = (width - 2 * mx) / (self.cols - 1)
         rows = [int(my + i * rs) for i in range(self.rows)]
@@ -175,8 +177,7 @@ class PlateAnalyzer:
         This improves dynamic range by ~2× on 8-bit camera sensors.
         """
         config = CHROMOGENS.get(chromogen, CHROMOGENS[DEFAULT_CHROMOGEN])
-        meas_ch = config["channel"]
-        ref_ch = config["ref_channel"]
+        signal_mode = config["signal"]
 
         wells_data: List[WellData] = []
         row_labels = "ABCDEFGH"
@@ -193,19 +194,25 @@ class PlateAnalyzer:
                 rgb_mean = tuple(np.mean(well_pixels, axis=0).astype(float))
                 rgb_median = tuple(np.median(well_pixels, axis=0).astype(float))
 
-                # Channel-specific intensity
-                if meas_ch is not None:
-                    raw = float(np.mean(well_pixels[:, meas_ch]))
-                    if ref_ch is not None:
-                        ref = float(np.mean(well_pixels[:, ref_ch]))
-                        intensity = max(raw - 0.3 * ref, 1.0)
-                    else:
-                        intensity = raw
+                b_mean, g_mean, r_mean = rgb_mean
+
+                # Reflectance-image color development score. This is not a
+                # spectrophotometer OD; it is a monotonic camera-derived OD-like
+                # feature where stronger chromogen color gives a larger value.
+                if signal_mode == "blue_excess":
+                    signal = b_mean - (g_mean + r_mean) / 2.0
+                elif signal_mode == "orange_excess":
+                    signal = (r_mean + 0.6 * g_mean) - 1.2 * b_mean
+                elif signal_mode == "yellow_excess":
+                    signal = (r_mean + g_mean) / 2.0 - b_mean
+                elif signal_mode == "green_excess":
+                    signal = g_mean - (r_mean + b_mean) / 2.0
                 else:
                     gray = cv2.cvtColor(well_pixels.reshape(-1, 1, 3), cv2.COLOR_BGR2GRAY)
-                    intensity = float(np.mean(gray))
+                    signal = 255.0 - float(np.mean(gray))
 
-                od = -np.log10((intensity + 1) / 256.0)
+                intensity = float(max(signal, 0.0))
+                od = float(np.log10(1.0 + intensity) / np.log10(256.0) * 2.0)
                 is_edge = (i == 0 or i == self.rows - 1 or j == 0 or j == self.cols - 1)
 
                 wells_data.append(WellData(
@@ -244,17 +251,6 @@ class PlateAnalyzer:
         if not neg_wells or not pos_wells:
             return {"applied": False, "reason": "Controls not found on plate"}
 
-        neg_mean_int = float(np.mean([w.intensity for w in neg_wells]))
-        pos_mean_int = float(np.mean([w.intensity for w in pos_wells]))
-
-        if neg_mean_int <= 1:
-            return {"applied": False, "reason": "Negative control intensity too low"}
-
-        # Blank-corrected OD using negative control as I₀
-        for well in wells:
-            ratio = max(well.intensity, 1) / neg_mean_int
-            well.optical_density = float(max(0.0, -np.log10(min(ratio, 1.0))))
-
         od_neg = float(np.mean([w.optical_density for w in neg_wells]))
         od_pos = float(np.mean([w.optical_density for w in pos_wells]))
         od_range = od_pos - od_neg
@@ -284,12 +280,12 @@ class PlateAnalyzer:
             "assay_type": assay_type,
             "negative_control": {
                 "positions": negative_control,
-                "mean_intensity": neg_mean_int,
+                "mean_intensity": float(np.mean([w.intensity for w in neg_wells])),
                 "mean_od": od_neg,
             },
             "positive_control": {
                 "positions": positive_control,
-                "mean_intensity": pos_mean_int,
+                "mean_intensity": float(np.mean([w.intensity for w in pos_wells])),
                 "mean_od": od_pos,
             },
             "od_range": od_range,
@@ -450,13 +446,13 @@ class PlateAnalyzer:
         if corners is None:
             corners = self._detect_plate_robust(image)
         if corners is None:
-            h, w = image.shape[:2]
-            corners = np.array([[0, 0], [w-1, 0], [w-1, h-1], [0, h-1]], dtype=np.float32)
-        if corners is None:
             return {
                 "success": False,
                 "error": "Could not detect ELISA plate in image",
                 "quality": quality,
+                "plate_detected": False,
+                "wells_detected": 0,
+                "expected_wells": self.total_wells,
             }
 
         corrected = correct_perspective(
@@ -469,7 +465,7 @@ class PlateAnalyzer:
         )
         row_sp = row_positions[1] - row_positions[0] if len(row_positions) > 1 else 40
         col_sp = col_positions[1] - col_positions[0] if len(col_positions) > 1 else 40
-        well_radius = int(min(row_sp, col_sp) * 0.35)
+        well_radius = int(min(row_sp, col_sp) * 0.33)
 
         wells_data = self.analyze_wells(
             corrected, row_positions, col_positions, well_radius, chromogen,

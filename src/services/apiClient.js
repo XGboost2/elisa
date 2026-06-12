@@ -178,16 +178,84 @@ export const generateSerialDilution = async (startConcentration, dilutionFactor 
     }
 };
 
-export const getReplicateStats = async (wells, groupSize = 2) => {
+export const getReplicateStats = async (wells, groups) => {
     try {
         const response = await apiClient.post(ENDPOINTS.REPLICATE_STATS, {
             wells,
-            group_size: groupSize,
+            groups,
         });
         return response.data;
     } catch (error) {
         console.error('Replicate stats error:', error.response?.data || error.message);
         throw new Error('Failed to calculate replicate stats');
+    }
+};
+
+export const uploadDatasetPlate = async (imageUri, metadata = {}) => {
+    try {
+        const formData = new FormData();
+        if (imageUri.startsWith('blob:') || imageUri.startsWith('http')) {
+            const response = await fetch(imageUri);
+            const blob = await response.blob();
+            formData.append('file', blob, `dataset_plate_${Date.now()}.jpg`);
+        } else {
+            const filename = imageUri.split('/').pop() || `dataset_plate_${Date.now()}.jpg`;
+            const match = /\.(\w+)$/.exec(filename);
+            const type = match ? `image/${match[1]}` : 'image/jpeg';
+            formData.append('file', { uri: imageUri, name: filename, type });
+        }
+
+        Object.entries(metadata).forEach(([key, value]) => {
+            if (value !== undefined && value !== null) {
+                formData.append(key, String(value));
+            }
+        });
+
+        const response = await apiClient.post(ENDPOINTS.DATASET_PLATES, formData, {
+            headers: { 'Content-Type': 'multipart/form-data' },
+            timeout: 60000,
+        });
+        return response.data;
+    } catch (error) {
+        console.error('Dataset upload error:', error.response?.data || error.message);
+        throw new Error(error.response?.data?.detail || 'Failed to upload dataset plate');
+    }
+};
+
+export const listDatasetPlates = async () => {
+    try {
+        const response = await apiClient.get(ENDPOINTS.DATASET_PLATES);
+        return response.data;
+    } catch (error) {
+        console.error('Dataset list error:', error.response?.data || error.message);
+        throw new Error('Failed to list dataset plates');
+    }
+};
+
+export const attachReaderCsvText = async (plateId, csvText) => {
+    try {
+        const formData = new FormData();
+        formData.append('csv_text', csvText);
+        const response = await apiClient.post(`${ENDPOINTS.DATASET_PLATES}/${plateId}/reader-csv`, formData, {
+            headers: { 'Content-Type': 'multipart/form-data' },
+            timeout: 30000,
+        });
+        return response.data;
+    } catch (error) {
+        console.error('Reader CSV attach error:', error.response?.data || error.message);
+        throw new Error(error.response?.data?.detail || 'Failed to attach reader CSV');
+    }
+};
+
+export const exportDatasetManifest = async () => {
+    try {
+        const response = await apiClient.get(ENDPOINTS.DATASET_MANIFEST, {
+            responseType: 'text',
+        });
+        return response.data;
+    } catch (error) {
+        console.error('Dataset manifest error:', error.response?.data || error.message);
+        throw new Error('Failed to export dataset manifest');
     }
 };
 
@@ -214,5 +282,9 @@ export default {
     exportResults,
     generateSerialDilution,
     getReplicateStats,
+    uploadDatasetPlate,
+    listDatasetPlates,
+    attachReaderCsvText,
+    exportDatasetManifest,
     testConnection,
 };

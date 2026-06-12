@@ -15,7 +15,7 @@ import {
 } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import theme from '../styles/theme';
-import { createCalibration, quantifySamples, generateSerialDilution } from '../services/apiClient';
+import { createCalibrationOffline, quantifySamplesOffline } from '../services/localCalibration';
 
 const ROW_LABELS = 'ABCDEFGH';
 
@@ -80,7 +80,7 @@ export default function CalibrationScreen({ route, navigation }) {
                 }
             });
 
-            const result = await createCalibration(concentrations, odValues, curveType);
+            const result = await createCalibrationOffline(concentrations, odValues, curveType);
             setCalibrationResult(result);
 
             const unknownODs = wells
@@ -88,7 +88,7 @@ export default function CalibrationScreen({ route, navigation }) {
                 .map(w => w.optical_density);
 
             if (unknownODs.length > 0 && result.calibration_id) {
-                const qResult = await quantifySamples(result.calibration_id, unknownODs);
+                const qResult = await quantifySamplesOffline(result, unknownODs);
                 const unknownWells = wells.filter(w => !selectedStandards.hasOwnProperty(w.position));
                 const mapped = qResult.results.map((r, i) => ({
                     ...r,

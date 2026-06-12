@@ -2,7 +2,7 @@
  * Camera screen for capturing ELISA plate images
  * Includes real-time alignment detection — grid turns green when plate is aligned, red when not.
  */
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
     View,
     Text,
@@ -15,23 +15,15 @@ import {
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { StatusBar } from 'expo-status-bar';
 import * as ImagePicker from 'expo-image-picker';
-import * as FileSystem from 'expo-file-system';
 import theme from '../styles/theme';
 import PlateOverlay from '../components/PlateOverlay';
-import { checkAlignment } from '../services/apiClient';
-
-const ALIGNMENT_CHECK_INTERVAL = 3000; // ms between checks
 
 export default function CameraScreen({ navigation }) {
     const [permission, requestPermission] = useCameraPermissions();
     const [cameraReady, setCameraReady] = useState(false);
     const [capturing, setCapturing] = useState(false);
     const [flash, setFlash] = useState('off');
-    const [isAligned, setIsAligned] = useState(null);
-    const [alignmentReason, setAlignmentReason] = useState(null);
     const cameraRef = useRef(null);
-    const alignmentCheckRef = useRef(null);
-    const isCheckingRef = useRef(false);
     const capturingRef = useRef(false);
 
     useEffect(() => {
@@ -40,53 +32,9 @@ export default function CameraScreen({ navigation }) {
         }
     }, [permission]);
 
-    // Start/stop alignment checking when camera is ready
-    useEffect(() => {
-        if (cameraReady) {
-            startAlignmentChecking();
-        }
-        return () => stopAlignmentChecking();
-    }, [cameraReady]);
-
-    const startAlignmentChecking = useCallback(() => {
-        stopAlignmentChecking();
-        alignmentCheckRef.current = setInterval(async () => {
-            if (!cameraRef.current || !cameraReady || capturingRef.current || isCheckingRef.current) return;
-
-            isCheckingRef.current = true;
-            let photoUri = null;
-            try {
-                const photo = await cameraRef.current.takePictureAsync({
-                    quality: 0.3,
-                    skipProcessing: true,
-                });
-                photoUri = photo.uri;
-                const result = await checkAlignment(photo.uri);
-                setIsAligned(result.aligned);
-                setAlignmentReason(result.aligned ? null : result.reason);
-            } catch (error) {
-                // Silently fail — don't disrupt the camera experience
-                console.log('Alignment check skipped:', error.message);
-            } finally {
-                isCheckingRef.current = false;
-                if (photoUri) {
-                    FileSystem.deleteAsync(photoUri, { idempotent: true }).catch(() => {});
-                }
-            }
-        }, ALIGNMENT_CHECK_INTERVAL);
-    }, [cameraReady]);
-
-    const stopAlignmentChecking = useCallback(() => {
-        if (alignmentCheckRef.current) {
-            clearInterval(alignmentCheckRef.current);
-            alignmentCheckRef.current = null;
-        }
-    }, []);
-
     const handleCapture = async () => {
         if (!cameraRef.current || !cameraReady || capturingRef.current) return;
 
-        stopAlignmentChecking();
         setCapturing(true);
         capturingRef.current = true;
 
@@ -100,7 +48,6 @@ export default function CameraScreen({ navigation }) {
         } catch (error) {
             Alert.alert('Error', 'Failed to capture image. Please try again.');
             console.error('Capture error:', error);
-            startAlignmentChecking();
         } finally {
             setCapturing(false);
             capturingRef.current = false;
@@ -169,7 +116,7 @@ export default function CameraScreen({ navigation }) {
                 onCameraReady={() => setCameraReady(true)}
             >
                 {/* Overlay guide with alignment color feedback */}
-                <PlateOverlay isAligned={isAligned} alignmentReason={alignmentReason} />
+                <PlateOverlay isAligned={null} alignmentReason={null} />
 
                 {/* Top controls */}
                 <View style={styles.topControls}>
@@ -198,7 +145,7 @@ export default function CameraScreen({ navigation }) {
                         Position the ELISA plate within the guide
                     </Text>
                     <Text style={styles.instructionSubtext}>
-                        Grid turns green when plate is aligned
+                        Keep the plate centered and parallel to the guide
                     </Text>
                 </View>
 
@@ -224,7 +171,6 @@ export default function CameraScreen({ navigation }) {
                         ) : (
                             <View style={[
                                 styles.captureButtonInner,
-                                isAligned === true && styles.captureButtonAligned,
                             ]} />
                         )}
                     </TouchableOpacity>

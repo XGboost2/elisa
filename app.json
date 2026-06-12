@@ -24,6 +24,7 @@
       "bundleIdentifier": "com.kuralelisa.elisaanalyser"
     },
     "android": {
+      "package": "com.kuralelisa.elisaanalyser",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
         "backgroundColor": "#ffffff"
@@ -44,7 +45,8 @@
         {
           "cameraPermission": "Allow $(PRODUCT_NAME) to access your camera to capture ELISA plate images."
         }
-      ]
+      ],
+      "expo-font"
     ],
     "extra": {
       "eas": {

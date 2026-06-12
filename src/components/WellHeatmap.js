@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, StyleSheet, useWindowDimensions } from 'react-native';
+import { View, Text, StyleSheet } from 'react-native';
 import theme from '../styles/theme';
 
 export function getColorFromOD(od) {
@@ -16,7 +16,7 @@ function getTextColorForOD(od) {
 }
 
 export default function WellHeatmap({ wells }) {
-    const { width } = useWindowDimensions();
+    const [containerWidth, setContainerWidth] = React.useState(0);
 
     const grid = Array(8).fill(null).map(() => Array(12).fill(null));
 
@@ -26,15 +26,21 @@ export default function WellHeatmap({ wells }) {
         }
     });
 
-    const cellWidth = (width - theme.spacing.md * 4) / 12;
+    const labelWidth = 22;
+    const cellGap = 2;
+    const availableWidth = Math.max(containerWidth - labelWidth - cellGap * 12, 0);
+    const cellWidth = availableWidth > 0 ? availableWidth / 12 : 0;
     const rowLabels = 'ABCDEFGH';
 
     return (
-        <View style={styles.container}>
+        <View
+            style={styles.container}
+            onLayout={(event) => setContainerWidth(event.nativeEvent.layout.width)}
+        >
             <View style={styles.columnLabelsRow}>
-                <View style={[styles.labelCell, { width: cellWidth }]} />
+                <View style={[styles.labelCell, { width: labelWidth }]} />
                 {Array.from({ length: 12 }).map((_, i) => (
-                    <View key={i} style={[styles.labelCell, { width: cellWidth }]}>
+                    <View key={i} style={[styles.labelCell, { width: cellWidth, marginRight: cellGap }]}>
                         <Text style={styles.labelText}>{i + 1}</Text>
                     </View>
                 ))}
@@ -42,7 +48,7 @@ export default function WellHeatmap({ wells }) {
 
             {grid.map((row, rowIndex) => (
                 <View key={rowIndex} style={styles.row}>
-                    <View style={[styles.labelCell, { width: cellWidth }]}>
+                    <View style={[styles.labelCell, { width: labelWidth }]}>
                         <Text style={styles.labelText}>{rowLabels[rowIndex]}</Text>
                     </View>
 

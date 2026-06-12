@@ -15,6 +15,7 @@ from utils.config import settings
 # Create upload and results directories
 os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
 os.makedirs(settings.RESULTS_DIR, exist_ok=True)
+os.makedirs(settings.DATASET_DIR, exist_ok=True)
 
 
 @asynccontextmanager
@@ -23,6 +24,7 @@ async def lifespan(app: FastAPI):
     print("🚀 Starting ELISA Analysis Backend...")
     print(f"📁 Upload directory: {settings.UPLOAD_DIR}")
     print(f"📊 Results directory: {settings.RESULTS_DIR}")
+    print(f"🧬 Dataset directory: {settings.DATASET_DIR}")
     yield
     print("👋 Shutting down ELISA Analysis Backend...")
 
@@ -66,6 +68,7 @@ async def health_check():
         "status": "healthy",
         "upload_dir_exists": os.path.exists(settings.UPLOAD_DIR),
         "results_dir_exists": os.path.exists(settings.RESULTS_DIR),
+        "dataset_dir_exists": os.path.exists(settings.DATASET_DIR),
     }
 
 

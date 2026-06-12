@@ -18,7 +18,7 @@ import { StatusBar } from 'expo-status-bar';
 import * as FileSystem from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
 import theme from '../styles/theme';
-import { analyzeImage, exportResults } from '../services/apiClient';
+import { analyzeImageOffline, resultsToCsv } from '../services/localAnalyzer';
 import WellHeatmap, { getColorFromOD } from '../components/WellHeatmap';
 
 const ROW_LABELS = 'ABCDEFGH';
@@ -209,7 +209,7 @@ export default function ResultsScreen({ route, navigation }) {
             if (chromogen) opts.chromogen = chromogen;
             if (assayType) opts.assayType = assayType;
 
-            const data = await analyzeImage(imageUri, opts);
+            const data = await analyzeImageOffline(imageUri, opts);
             if (mountedRef.current) {
                 setResults(data);
                 setPhase('done');
@@ -309,11 +309,7 @@ export default function ResultsScreen({ route, navigation }) {
 
     const handleExportCSV = async () => {
         try {
-            if (!results.analysis_id) {
-                Alert.alert('Export', 'No analysis ID available for export.');
-                return;
-            }
-            const csvData = await exportResults(results.analysis_id);
+            const csvData = resultsToCsv(results);
             const fileUri = FileSystem.documentDirectory + `elisa_${results.analysis_id}.csv`;
             await FileSystem.writeAsStringAsync(fileUri, csvData);
             if (await Sharing.isAvailableAsync()) {
@@ -463,8 +459,9 @@ export default function ResultsScreen({ route, navigation }) {
                 <View style={[styles.card, { borderLeftWidth: 4, borderLeftColor: theme.colors.warning }]}>
                     <Text style={styles.cardTitle}>Edge Effect Warning</Text>
                     <Text style={styles.edgeText}>
-                        Outer wells show {(edgeEffects.edge_cv_percent ?? 0).toFixed(1)}% CV vs{' '}
-                        {(edgeEffects.inner_cv_percent ?? 0).toFixed(1)}% for inner wells.
+                        Edge wells differ from inner wells by {(edgeEffects.difference_pct ?? 0).toFixed(1)}%.
+                        Edge mean OD: {(edgeEffects.edge_mean_od ?? 0).toFixed(3)}; inner mean OD:{' '}
+                        {(edgeEffects.inner_mean_od ?? 0).toFixed(3)}.
                     </Text>
                     <Text style={styles.edgeHint}>
                         Edge wells may be less reliable due to temperature gradients during incubation.

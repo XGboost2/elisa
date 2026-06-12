@@ -81,6 +81,52 @@ npx expo start --web
    - Check quality metrics
 5. **Optional**: Create calibration curves for concentration quantification
 
+## ML Dataset Collection Workflow
+
+Use **Collect ML Dataset** on the home screen when lab mates need to collect raw images for later validation or deep-learning experiments.
+
+Recommended workflow:
+
+1. Start the backend.
+2. Open **Collect ML Dataset**.
+3. Take or choose a raw ELISA plate photo.
+4. Enter metadata:
+   - Study / batch name
+   - Assay name
+   - Operator or lab mate ID
+   - Phone / camera model
+   - Lighting or fixture condition
+   - Chromogen and assay type
+   - Notes
+5. Tap **Save Dataset Plate**.
+6. Later, paste the spectrophotometer / plate-reader CSV into **Attach Reader CSV** for that same plate.
+7. Export **Dataset Manifest CSV** when preparing data for analysis or machine learning.
+
+The backend stores each collected plate under `backend/dataset/{plate_id}/` with:
+
+- the raw image
+- `metadata.json`
+- optional raw reader CSV
+- parsed reader OD labels by well
+
+The manifest endpoint is:
+
+```text
+GET /api/dataset/manifest.csv
+```
+
+It exports one row per labeled well:
+
+```csv
+plate_id,well,reader_od,image_path,study_name,assay_name,operator,device_model,lighting_condition,chromogen,assay_type,created_at,notes
+```
+
+Supported reader CSV formats:
+
+- Long format: `well,od`
+- 8x12 matrix format with rows `A-H` and columns `1-12`
+- Vendor-style adjacent well/value pairs such as `A1,0.052,A2,0.061`
+
 ## API Configuration
 
 Edit `src/config/api.js`:
